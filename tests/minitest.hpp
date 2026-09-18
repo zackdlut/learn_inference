@@ -38,6 +38,7 @@ class case_manager {
     void run_all() {
         int failed = 0;
         for (const auto &c : cases_) {
+            std::printf("\n  %s\n", c.name.c_str());
             try {
                 c.func();
                 std::printf("  \033[32mPASS\033[0m  %s\n", c.name.c_str());
@@ -59,6 +60,14 @@ class case_manager {
     std::vector<test_case> cases_;
 };
 
+inline void report_check_pass(const std::string &detail) {
+    std::printf("        \033[32mPASS\033[0m  %s\n", detail.c_str());
+}
+
+inline std::string at(const char *file, int line) {
+    return std::string(file) + ":" + std::to_string(line);
+}
+
 } // namespace minitest
 
 #define TEST(name)                                                                                 \
@@ -75,18 +84,23 @@ class case_manager {
 #define CHECK(cond)                                                                                \
     do {                                                                                           \
         if (!(cond)) {                                                                             \
-            throw minitest::failure("CHECK failed: " + std::string(#cond));                        \
+            throw ::minitest::failure("CHECK failed: " + std::string(#cond) + " @ " +               \
+                                      ::minitest::at(__FILE__, __LINE__));                         \
         }                                                                                          \
+        ::minitest::report_check_pass(std::string("CHECK(" #cond ") @ ") +                          \
+                                      ::minitest::at(__FILE__, __LINE__));                         \
     } while (0)
 
 #define CHECK_NEAR(a, b, eps)                                                                      \
     do {                                                                                           \
         const double va = (a), vb = (b);                                                           \
+        const std::string loc = ::minitest::at(__FILE__, __LINE__);                                \
         if (std::abs(va - vb) > (eps)) {                                                           \
             throw ::minitest::failure("CHECK_NEAR 失败: " #a "=" + std::to_string(va) +            \
-                                      " vs " #b "=" + std::to_string(vb) + " @ " + __FILE__ +      \
-                                      ":" + std::to_string(__LINE__));                             \
+                                      " vs " #b "=" + std::to_string(vb) + " @ " + loc);          \
         }                                                                                          \
+        ::minitest::report_check_pass("CHECK_NEAR(" #a ", " #b "): " + std::to_string(va) + " vs " + \
+                                      std::to_string(vb) + " @ " + loc);                           \
     } while (0)
 
 #define CHECK_THROWS(expr)                                                                         \
@@ -97,8 +111,9 @@ class case_manager {
         } catch (...) {                                                                            \
             thrown = true;                                                                         \
         }                                                                                          \
+        const std::string loc = ::minitest::at(__FILE__, __LINE__);                                \
         if (!thrown) {                                                                             \
-            throw ::minitest::failure("期望 " #expr " 抛异常，但它没有 @ " +                       \
-                                      std::string(__FILE__) + ":" + std::to_string(__LINE__));     \
+            throw ::minitest::failure("期望 " #expr " 抛异常，但它没有 @ " + loc);                 \
         }                                                                                          \
+        ::minitest::report_check_pass(std::string("CHECK_THROWS(" #expr ") @ ") + loc);             \
     } while (0)

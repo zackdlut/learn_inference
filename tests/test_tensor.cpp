@@ -15,7 +15,7 @@ TEST(shape_and_stride) {
     CHECK(t.ndim() == 3);
     CHECK(t.numel() == 24);
     CHECK(t.shape() == Shape({2, 3, 4}));
-    CHECK(t.strides() == Shape({24, 8, 2}));
+    CHECK(t.strides() == Shape({12, 4, 1}));
     CHECK(t.is_contiguous());
 }
 
@@ -43,4 +43,13 @@ TEST(indexing_out_of_range) {
     CHECK_THROWS(t(0, 3));
     CHECK_THROWS(t(2, 0));
     CHECK_THROWS(t(2, 3));
+}
+
+TEST(reshape) {
+    Tensor t = Tensor::from({2, 3}, {1, 2, 3, 4, 5, 6});
+    Tensor b = t.reshape({3, 2});
+    CHECK(b.numel() == 6);
+
+    b(0, 1) = 99.0F;
+    CHECK_NEAR(t(0, 1), 99.0, 1e-6);
 }
