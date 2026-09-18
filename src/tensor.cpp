@@ -46,7 +46,7 @@ int64 numel_of(const Shape &shape) {
 //=============================================================================
 // 张量构造函数
 //=============================================================================
-Tensor Tensor::zeros(Shape shape, DType dtype) noexcept {
+Tensor Tensor::zeros(Shape shape, DType dtype) {
     if (std::ranges::any_of(shape, [](int64 dim) { return dim < 0; })) {
         fail("shape must be non-negative");
     }
@@ -60,13 +60,13 @@ Tensor Tensor::zeros(Shape shape, DType dtype) noexcept {
     return t;
 }
 
-Tensor Tensor::full(Shape shape, float value) noexcept {
+Tensor Tensor::full(Shape shape, float value) {
     Tensor t = zeros(std::move(shape), DType::FP32);
     std::ranges::fill(t.data(), value);
     return t;
 }
 
-Tensor Tensor::arange(int64 n) noexcept {
+Tensor Tensor::arange(int64 n) {
     Tensor t = zeros({n}, DType::FP32);
     std::span<float> d = t.data();
     for (int64 i = 0; i < n; ++i) {
@@ -75,7 +75,7 @@ Tensor Tensor::arange(int64 n) noexcept {
     return t;
 }
 
-Tensor Tensor::from(Shape shape, std::span<const float> src) noexcept {
+Tensor Tensor::from(Shape shape, std::span<const float> src) {
     Tensor t = zeros(std::move(shape), DType::FP32);
     if (static_cast<int64>(src.size()) != t.numel_) {
         fail(std::format("data size must be {} but got {}", t.numel_,
@@ -85,7 +85,7 @@ Tensor Tensor::from(Shape shape, std::span<const float> src) noexcept {
     return t;
 }
 
-Tensor Tensor::from(Shape shape, std::initializer_list<float> src) noexcept {
+Tensor Tensor::from(Shape shape, std::initializer_list<float> src) {
     return from(std::move(shape), std::span<const float>(src.begin(), src.size()));
 }
 
@@ -113,7 +113,7 @@ std::span<const float> Tensor::data() const {
     return {raw_ptr() + offset_, static_cast<std::size_t>(numel_)};
 }
 
-int64 Tensor::offset_of(std::span<const int64> index) const noexcept {
+int64 Tensor::offset_of(std::span<const int64> index) const {
     if (static_cast<int64>(index.size()) != ndim()) {
         fail("index size must be equal to shape size");
     }
@@ -172,7 +172,7 @@ Tensor Tensor::slice(int64 axis, int64 start, int64 end) const {
     return t;
 }
 
-Tensor Tensor::contiguous() const noexcept {
+Tensor Tensor::contiguous() const {
     if (is_contiguous()) {
         return *this; // 已经紧凑，不用白拷一遍
     }

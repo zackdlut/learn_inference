@@ -33,15 +33,15 @@ class Tensor {
     // 默认构造函数
     Tensor() noexcept = default;
     // 创建全0张量
-    static Tensor zeros(Shape shape, DType dtype = DType::FP32) noexcept;
+    static Tensor zeros(Shape shape, DType dtype = DType::FP32);
     // 创建全value张量
-    static Tensor full(Shape shape, float value) noexcept;
+    static Tensor full(Shape shape, float value);
     // 创建等差数列张量 [0, 1, 2, ..., n-1]
-    static Tensor arange(int64 n) noexcept;
+    static Tensor arange(int64 n);
     // 从数组创建张量
-    static Tensor from(Shape shape, std::span<const float> data) noexcept;
+    static Tensor from(Shape shape, std::span<const float> data);
     // 从初始化列表创建张量
-    static Tensor from(Shape shape, std::initializer_list<float> data) noexcept;
+    static Tensor from(Shape shape, std::initializer_list<float> data);
     //=============================================================================
     // 获取张量元信息
     //=============================================================================
@@ -98,7 +98,7 @@ class Tensor {
     [[nodiscard]] Tensor slice(int64 axis, int64 start, int64 end) const;
 
     // 唯一会真正拷贝内存的操作：把 view 落实成一块紧凑内存。
-    [[nodiscard]] Tensor contiguous() const noexcept;
+    [[nodiscard]] Tensor contiguous() const;
     //=============================================================================
     // 打印张量信息
     //=============================================================================
@@ -119,7 +119,7 @@ class Tensor {
     [[nodiscard]] const float *raw_ptr() const noexcept {
         return reinterpret_cast<const float *>(data_.get());
     }
-    [[nodiscard]] int64 offset_of(std::span<const int64> index) const noexcept;
+    [[nodiscard]] int64 offset_of(std::span<const int64> index) const;
 };
 
 } // namespace inference
