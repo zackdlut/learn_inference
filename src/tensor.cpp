@@ -182,6 +182,33 @@ Tensor Tensor::reshape(Shape new_shape) const {
     return t;
 }
 
+Tensor Tensor::permute(Shape new_order) const {
+    if (static_cast<int64>(new_order.size()) != ndim()) {
+        fail(std::format("permute 需要 {} 个轴，收到 {}", ndim(),
+                         static_cast<int64>(new_order.size())));
+    }
+
+    std::vector<char> seen(static_cast<std::size_t>(ndim()), 0);
+    for (int64 axis : new_order) {
+        if (axis < 0 || axis >= ndim()) {
+            fail(std::format("permute 轴 {} 越界，ndim={}", axis, ndim()));
+        }
+        const auto u = static_cast<std::size_t>(axis);
+        if (seen[u] != 0) {
+            fail(std::format("permute 轴不能重复，收到 {}", shape_string(new_order)));
+        }
+        seen[u] = 1;
+    }
+
+    Tensor t = *this;
+    for (std::size_t i = 0; i < new_order.size(); ++i) {
+        const auto src = static_cast<std::size_t>(new_order[i]);
+        t.shape_[i] = shape_[src];
+        t.strides_[i] = strides_[src];
+    }
+    return t;
+}
+
 Tensor Tensor::transpose(int64 a, int64 b) const {
     if (a < 0 || a >= ndim() || b < 0 || b >= ndim()) {
         fail("index out of range");

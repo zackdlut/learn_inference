@@ -103,6 +103,41 @@ TEST(transpose) {
     CHECK_THROWS(at.reshape({6}));
 }
 
+TEST(permute_reorders_axes) {
+    Tensor a = Tensor::arange(24).reshape({2, 3, 4});
+    Tensor p = a.permute({2, 0, 1});
+
+    CHECK(p.shape() == Shape({4, 2, 3}));
+    CHECK(p.strides() == Shape({1, 12, 4}));
+    CHECK(p.numel() == 24);
+    CHECK(!p.is_contiguous());
+
+    // p(k, i, j) 对应原来的 a(i, j, k)
+    CHECK_NEAR(p(0, 0, 0), a(0, 0, 0), 1e-6);
+    CHECK_NEAR(p(3, 0, 1), a(0, 1, 3), 1e-6);
+    CHECK_NEAR(p(2, 1, 2), a(1, 2, 2), 1e-6);
+
+    Tensor id = a.permute({0, 1, 2});
+    CHECK(id.shape() == a.shape());
+    CHECK(id.strides() == a.strides());
+    CHECK(id.is_contiguous());
+
+    Tensor t2 = Tensor::from({2, 3}, {1, 2, 3, 4, 5, 6});
+    Tensor pt = t2.permute({1, 0});
+    CHECK(pt.shape() == t2.transpose(0, 1).shape());
+    CHECK(pt.strides() == t2.transpose(0, 1).strides());
+    CHECK_NEAR(pt(2, 1), 6.0, 1e-6);
+}
+
+TEST(permute_throws) {
+    Tensor a = Tensor::arange(24).reshape({2, 3, 4});
+    CHECK_THROWS(a.permute({0, 1}));       // 长度不够
+    CHECK_THROWS(a.permute({0, 1, 2, 3})); // 长度过长
+    CHECK_THROWS(a.permute({0, 1, 3}));    // 轴越界
+    CHECK_THROWS(a.permute({0, 0, 1}));    // 轴重复
+    CHECK_THROWS(a.permute({-1, 0, 1}));   // 负数轴
+}
+
 TEST(contiguous_materializes) {
     Tensor a = Tensor::from({2, 3}, {1, 2, 3, 4, 5, 6});
     Tensor c = a.transpose(0, 1).contiguous();

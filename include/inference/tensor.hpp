@@ -96,6 +96,9 @@ class Tensor {
     [[nodiscard]] Tensor reshape(Shape new_shape) const;
     // 转置张量
     [[nodiscard]] Tensor transpose(int64 a, int64 b) const;
+    // 按 new_order 重排轴。new_order 必须是 0..ndim-1 的一个排列（不能缺、不能重复）。
+    [[nodiscard]] Tensor permute(Shape new_order) const;
+
     // 切片张量
     [[nodiscard]] Tensor slice(int64 axis, int64 start, int64 end) const;
 
