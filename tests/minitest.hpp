@@ -5,7 +5,30 @@
 #include <functional>
 #include <string>
 #include <vector>
+#if defined(_WIN32)
+#include <io.h>
+#else
+#include <unistd.h>
+#endif
 namespace minitest {
+
+inline bool use_color() {
+#if defined(_WIN32)
+    return _isatty(_fileno(stdout)) != 0;
+#else
+    return isatty(STDOUT_FILENO) != 0;
+#endif
+}
+
+inline const char *ansi_green() {
+    return use_color() ? "\033[32m" : "";
+}
+inline const char *ansi_red() {
+    return use_color() ? "\033[31m" : "";
+}
+inline const char *ansi_reset() {
+    return use_color() ? "\033[0m" : "";
+}
 
 struct test_case {
     std::string name;
@@ -35,19 +58,55 @@ class case_manager {
         return cases_;
     }
 
-    void run_all() {
-        int failed = 0;
+    void list() const {
         for (const auto &c : cases_) {
+            std::puts(c.name.c_str());
+        }
+    }
+
+    // filters 为空时跑全部；否则只跑名称精确匹配的用例。返回失败个数。
+    int run(const std::vector<std::string> &filters = {}) const {
+        int failed = 0;
+        int ran = 0;
+        for (const auto &c : cases_) {
+            if (!filters.empty()) {
+                bool selected = false;
+                for (const auto &f : filters) {
+                    if (c.name == f) {
+                        selected = true;
+                        break;
+                    }
+                }
+                if (!selected) {
+                    continue;
+                }
+            }
+            ++ran;
             std::printf("\n  %s\n", c.name.c_str());
             try {
                 c.func();
-                std::printf("  \033[32mPASS\033[0m  %s\n", c.name.c_str());
+                std::printf("  %sPASS%s  %s\n", ansi_green(), ansi_reset(), c.name.c_str());
             } catch (const std::exception &e) {
-                std::printf("  \033[31mFAIL\033[0m  %s\n        %s\n", c.name.c_str(), e.what());
+                std::printf("  %sFAIL%s  %s\n        %s\n", ansi_red(), ansi_reset(), c.name.c_str(),
+                            e.what());
                 ++failed;
             }
         }
-        std::printf("\n%zu 个用例，\033[31m%d 个失败\033[0m\n", cases_.size(), failed);
+        if (!filters.empty() && ran == 0) {
+            std::printf("没有匹配的用例:");
+            for (const auto &f : filters) {
+                std::printf(" %s", f.c_str());
+            }
+            std::printf("\n可用用例:\n");
+            list();
+            return 1;
+        }
+        std::printf("\n%d 个用例，%s%d 个失败%s\n", ran, ansi_red(), failed, ansi_reset());
+        return failed;
+    }
+
+    int run_all() const {
+        return run({});
     }
     case_manager(const case_manager &) = delete;
     case_manager &operator=(const case_manager &) = delete;
@@ -61,7 +120,7 @@ class case_manager {
 };
 
 inline void report_check_pass(const std::string &detail) {
-    std::printf("        \033[32mPASS\033[0m  %s\n", detail.c_str());
+    std::printf("        %sPASS%s  %s\n", ansi_green(), ansi_reset(), detail.c_str());
 }
 
 inline std::string at(const char *file, int line) {

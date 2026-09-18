@@ -52,4 +52,7 @@ TEST(reshape) {
 
     b(0, 1) = 99.0F;
     CHECK_NEAR(t(0, 1), 99.0, 1e-6);
+
+    b(0, 1) = 99.0F;
+    CHECK_NEAR(t(0, 0), 99.0, 1e-6);
 }
