@@ -117,8 +117,8 @@ int64 Tensor::offset_of(std::span<const int64> index) const {
     if (static_cast<int64>(index.size()) != ndim()) {
         fail("index size must be equal to shape size");
     }
-    // 核心公式：线性偏移 = Σ 下标[i] * 步长[i]
-    int64 offset = 0;
+    // 核心公式：线性偏移 = offset_ + Σ 下标[i] * 步长[i]
+    int64 offset = offset_;
     for (int64 i = 0; i < static_cast<int64>(index.size()); ++i) {
         if (index[i] < 0 || index[i] >= shape_[i]) {
             fail("index out of range");
@@ -158,7 +158,7 @@ Tensor Tensor::slice(int64 axis, int64 start, int64 end) const {
     if (axis < 0 || axis >= ndim()) {
         fail("index out of range");
     }
-    if (start < 0 || start >= shape_[axis] || end < 0 || end >= shape_[axis]) {
+    if (start < 0 || start >= shape_[axis] || end < 0 || end > shape_[axis]) {
         fail("index out of range");
     }
     if (start >= end) {

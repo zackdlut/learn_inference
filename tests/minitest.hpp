@@ -87,8 +87,8 @@ class case_manager {
                 c.func();
                 std::printf("  %sPASS%s  %s\n", ansi_green(), ansi_reset(), c.name.c_str());
             } catch (const std::exception &e) {
-                std::printf("  %sFAIL%s  %s\n        %s\n", ansi_red(), ansi_reset(), c.name.c_str(),
-                            e.what());
+                std::printf("  %sFAIL%s  %s\n        %s\n", ansi_red(), ansi_reset(),
+                            c.name.c_str(), e.what());
                 ++failed;
             }
         }
@@ -143,10 +143,10 @@ inline std::string at(const char *file, int line) {
 #define CHECK(cond)                                                                                \
     do {                                                                                           \
         if (!(cond)) {                                                                             \
-            throw ::minitest::failure("CHECK failed: " + std::string(#cond) + " @ " +               \
+            throw ::minitest::failure("CHECK failed: " + std::string(#cond) + " @ " +              \
                                       ::minitest::at(__FILE__, __LINE__));                         \
         }                                                                                          \
-        ::minitest::report_check_pass(std::string("CHECK(" #cond ") @ ") +                          \
+        ::minitest::report_check_pass(std::string("CHECK(" #cond ") @ ") +                         \
                                       ::minitest::at(__FILE__, __LINE__));                         \
     } while (0)
 
@@ -156,10 +156,10 @@ inline std::string at(const char *file, int line) {
         const std::string loc = ::minitest::at(__FILE__, __LINE__);                                \
         if (std::abs(va - vb) > (eps)) {                                                           \
             throw ::minitest::failure("CHECK_NEAR 失败: " #a "=" + std::to_string(va) +            \
-                                      " vs " #b "=" + std::to_string(vb) + " @ " + loc);          \
+                                      " vs " #b "=" + std::to_string(vb) + " @ " + loc);           \
         }                                                                                          \
-        ::minitest::report_check_pass("CHECK_NEAR(" #a ", " #b "): " + std::to_string(va) + " vs " + \
-                                      std::to_string(vb) + " @ " + loc);                           \
+        ::minitest::report_check_pass("CHECK_NEAR(" #a ", " #b "): " + std::to_string(va) +        \
+                                      " vs " + std::to_string(vb) + " @ " + loc);                  \
     } while (0)
 
 #define CHECK_THROWS(expr)                                                                         \
@@ -174,5 +174,5 @@ inline std::string at(const char *file, int line) {
         if (!thrown) {                                                                             \
             throw ::minitest::failure("期望 " #expr " 抛异常，但它没有 @ " + loc);                 \
         }                                                                                          \
-        ::minitest::report_check_pass(std::string("CHECK_THROWS(" #expr ") @ ") + loc);             \
+        ::minitest::report_check_pass(std::string("CHECK_THROWS(" #expr ") @ ") + loc);            \
     } while (0)

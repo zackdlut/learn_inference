@@ -52,7 +52,55 @@ TEST(reshape) {
 
     b(0, 1) = 99.0F;
     CHECK_NEAR(t(0, 1), 99.0, 1e-6);
+}
 
-    b(0, 1) = 99.0F;
-    CHECK_NEAR(t(0, 0), 99.0, 1e-6);
+TEST(transpose) {
+    Tensor a = Tensor::from({2, 3}, {1, 2, 3, 4, 5, 6});
+    Tensor at = a.transpose(0, 1);
+    CHECK(at.numel() == 6);
+    CHECK(at.shape() == Shape({3, 2}));
+    CHECK(at.strides() == Shape({1, 3}));
+    CHECK(at.is_contiguous() == false);
+    CHECK_THROWS(at.data()); // 非连续，禁止直接取裸内存
+    CHECK_THROWS(at.reshape({6}));
+}
+
+TEST(contiguous_materializes) {
+    Tensor a = Tensor::from({2, 3}, {1, 2, 3, 4, 5, 6});
+    Tensor c = a.transpose(0, 1).contiguous();
+
+    CHECK(c.is_contiguous());
+    // 转置后按行优先重新排布应为 1 4 2 5 3 6
+    const Shape expect_shape{3, 2};
+    CHECK(c.shape() == expect_shape);
+    const float want[] = {1, 4, 2, 5, 3, 6};
+    auto got = c.data();
+    for (std::size_t i = 0; i < 6; ++i) {
+        CHECK_NEAR(got[i], want[i], 1e-6);
+    }
+}
+
+TEST(slice_moves_offset) {
+    Tensor a = Tensor::arange(12).reshape({3, 4});
+    Tensor row = a.slice(0, 1, 2); // 取第 1 行，形状 (1, 4)
+
+    CHECK((row.shape() == Shape{1, 4}));
+    CHECK_NEAR(row(0, 0), 4.0, 1e-6);
+    CHECK_NEAR(row(0, 3), 7.0, 1e-6);
+
+    Tensor col = a.slice(1, 2, 4); // 取第 2~3 列，形状 (3, 2)
+    CHECK((col.shape() == Shape{3, 2}));
+    CHECK_NEAR(col(0, 0), 2.0, 1e-6);
+    CHECK_NEAR(col(2, 1), 11.0, 1e-6);
+    CHECK(!col.is_contiguous()); // 列切片跳着取，不连续
+    Tensor col_contiguous = col.contiguous();
+    CHECK(col_contiguous.is_contiguous());
+    CHECK((col_contiguous.shape() == Shape{3, 2}));
+    CHECK_NEAR(col_contiguous(0, 0), 2.0, 1e-6);
+    CHECK_NEAR(col_contiguous(2, 1), 11.0, 1e-6);
+}
+
+TEST(bad_construction_throws) {
+    CHECK_THROWS(Tensor::from({2, 3}, {1, 2, 3})); // 数据只有 3 个，形状要 6 个
+    CHECK_THROWS(Tensor::zeros({2, 3}).reshape({5}));
 }
