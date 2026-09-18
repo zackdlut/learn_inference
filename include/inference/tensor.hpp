@@ -36,6 +36,8 @@ class Tensor {
     static Tensor zeros(Shape shape, DType dtype = DType::FP32);
     // 创建全value张量
     static Tensor full(Shape shape, float value);
+    // 创建全1张量
+    static Tensor ones(Shape shape, DType dtype = DType::FP32);
     // 创建等差数列张量 [0, 1, 2, ..., n-1]
     static Tensor arange(int64 n);
     // 从数组创建张量
@@ -90,7 +92,7 @@ class Tensor {
         const int64 raw[] = {static_cast<int64>(index)...};
         return raw_ptr()[offset_of(std::span<const int64>{raw, sizeof...(Index)})];
     }
-    // 重塑张量形状
+    // 重塑张量形状。new_shape 中可以有一个 -1，表示由元素总数自动推断该维。
     [[nodiscard]] Tensor reshape(Shape new_shape) const;
     // 转置张量
     [[nodiscard]] Tensor transpose(int64 a, int64 b) const;

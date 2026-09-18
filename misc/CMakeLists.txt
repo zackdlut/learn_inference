@@ -1,21 +1,14 @@
-cmake_minimum_required(VERSION 3.20)
-project(LearnInference LANGUAGE CXX VERSION 0.1.0)
+function(add_misc name)
+  add_executable(${name} ${name}.cpp)
+  #target_link_libraries(${name} PRIVATE inference)
+  # 模型目录的绝对路径，这样从任何工作目录运行都能找到权重文件
+  target_compile_definitions(${name} PRIVATE
+    INFER_MODEL_DIR="${CMAKE_SOURCE_DIR}/models"
+  )
+endfunction()
 
-set(CMAKE_CXX_STANDARD 20)
-set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_CXX_EXTENSIONS OFF)
-
-SET(CMAKE_EXPORT_COMPILE_COMMANDS ON)
-
-
-
-find_package(Torch REQUIRED)
-
-add_executable(LearnInference main.cpp)
-
-target_include_directories(LearnInference PRIVATE ${CMAKE_SOURCE_DIR}/include)
-target_link_libraries(LearnInference PRIVATE ${CMAKE_SOURCE_DIR}/lib/libtorch.so)
-target_link_libraries(LearnInference PRIVATE ${CMAKE_SOURCE_DIR}/lib/libtorch_cpu.so)
-target_link_libraries(LearnInference PRIVATE ${CMAKE_SOURCE_DIR}/lib/libtorch_cuda.so)
-target_link_libraries(LearnInference PRIVATE ${CMAKE_SOURCE_DIR}/lib/libtorch_cuda_cu.so)
-target_link_libraries(LearnInference PRIVATE ${CMAKE_SOURCE_DIR}/lib/libtorch_cuda_cu.so)
+add_misc(foundation)
+add_misc(float_p)
+add_misc(xor_test)
+add_misc(xor_mal)
+add_misc(matmul)

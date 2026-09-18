@@ -60,6 +60,12 @@ Tensor Tensor::zeros(Shape shape, DType dtype) {
     return t;
 }
 
+Tensor Tensor::ones(Shape shape, DType dtype) {
+    Tensor t = zeros(std::move(shape), dtype);
+    std::ranges::fill(t.data(), 1.0F);
+    return t;
+}
+
 Tensor Tensor::full(Shape shape, float value) {
     Tensor t = zeros(std::move(shape), DType::FP32);
     std::ranges::fill(t.data(), value);
@@ -128,10 +134,43 @@ int64 Tensor::offset_of(std::span<const int64> index) const {
     return offset;
 }
 
+// 把 new_shape 里唯一的 -1 替换成推断出的正数。
+// 规则：最多一个 -1；其余维度必须非负；已知维度乘积必须整除 numel。
+Shape infer_reshape_shape(Shape new_shape, int64 numel) {
+    int64 infer_idx = -1;
+    int64 known = 1;
+    for (std::size_t i = 0; i < new_shape.size(); ++i) {
+        const int64 d = new_shape[i];
+        if (d == -1) {
+            if (infer_idx >= 0) {
+                fail("reshape 最多只能有一个 -1");
+            }
+            infer_idx = static_cast<int64>(i);
+        } else if (d < 0) {
+            fail(std::format("reshape 维度必须非负或为 -1，收到 {}", d));
+        } else {
+            known *= d;
+        }
+    }
+
+    if (infer_idx >= 0) {
+        if (known == 0) {
+            fail(std::format("无法从 {} 推断 -1（已知维度乘积为 0）", shape_string(new_shape)));
+        }
+        if (numel % known != 0) {
+            fail(std::format("无法从 {} 推断 -1：{} 不能被 {} 整除", shape_string(new_shape), numel,
+                             known));
+        }
+        new_shape[static_cast<std::size_t>(infer_idx)] = numel / known;
+    }
+    return new_shape;
+}
+
 Tensor Tensor::reshape(Shape new_shape) const {
     if (!is_contiguous()) {
         fail("非连续张量不能 reshape，请先调用 contiguous()");
     }
+    new_shape = infer_reshape_shape(std::move(new_shape), numel_);
     if (numel_of(new_shape) != numel_) {
         fail(std::format("reshape {} -> {} 元素个数不一致（{} vs {}）", shape_string(shape_),
                          shape_string(new_shape), numel_, numel_of(new_shape)));

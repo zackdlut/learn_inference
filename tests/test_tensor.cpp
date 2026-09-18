@@ -10,6 +10,16 @@ TEST(tensor_zeros) {
     CHECK(tensor.numel() == 6);
 }
 
+TEST(tensor_ones) {
+    Tensor tensor = Tensor::ones({2, 3});
+    CHECK(tensor.shape() == Shape({2, 3}));
+    CHECK(tensor.dtype() == DType::FP32);
+    CHECK(tensor.numel() == 6);
+    CHECK_NEAR(tensor(0, 0), 1.0, 1e-6);
+    CHECK_NEAR(tensor(0, 1), 1.0, 1e-6);
+    CHECK_NEAR(tensor(0, 2), 1.0, 1e-6);
+}
+
 TEST(shape_and_stride) {
     Tensor t = Tensor::zeros({2, 3, 4});
     CHECK(t.ndim() == 3);
@@ -52,6 +62,34 @@ TEST(reshape) {
 
     b(0, 1) = 99.0F;
     CHECK_NEAR(t(0, 1), 99.0, 1e-6);
+}
+
+TEST(reshape_infer_minus_one) {
+    Tensor t = Tensor::from({2, 3}, {1, 2, 3, 4, 5, 6});
+
+    Tensor a = t.reshape({2, -1});
+    CHECK(a.shape() == Shape({2, 3}));
+    CHECK(a.strides() == Shape({3, 1}));
+    CHECK_NEAR(a(1, 2), 6.0, 1e-6);
+
+    Tensor b = t.reshape({-1, 2});
+    CHECK(b.shape() == Shape({3, 2}));
+    CHECK_NEAR(b(2, 1), 6.0, 1e-6);
+
+    Tensor c = t.reshape({-1});
+    CHECK(c.shape() == Shape({6}));
+    CHECK_NEAR(c(5), 6.0, 1e-6);
+
+    Tensor d = t.reshape({2, 3, -1});
+    CHECK(d.shape() == Shape({2, 3, 1}));
+}
+
+TEST(reshape_infer_minus_one_throws) {
+    Tensor t = Tensor::from({2, 3}, {1, 2, 3, 4, 5, 6});
+    CHECK_THROWS(t.reshape({2, -1, -1})); // 多于一个 -1
+    CHECK_THROWS(t.reshape({5, -1}));     // 6 不能被 5 整除
+    CHECK_THROWS(t.reshape({-2, 3}));     // 非法负数
+    CHECK_THROWS(t.reshape({0, -1}));     // 已知乘积为 0，无法推断
 }
 
 TEST(transpose) {

@@ -43,6 +43,7 @@ target_link_libraries(inference PUBLIC inference_flags)
 
 # 代码示例
 add_subdirectory(examples)
+add_subdirectory(misc)
 
 # 测试用例
 enable_testing()
