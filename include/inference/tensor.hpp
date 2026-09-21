@@ -3,6 +3,7 @@
 #include "dtype.hpp"
 #include <concepts>
 #include <cstdint>
+#include <format>
 #include <initializer_list>
 #include <memory>
 #include <span>
@@ -128,3 +129,32 @@ class Tensor {
 };
 
 } // namespace inference
+
+// ---------------------------------------------------------------------------
+// std::formatter 特化：让 Tensor 能直接用在 std::format 里。
+//
+// C++20 格式化库的扩展点只有两个函数：
+//   parse  —— 读 "{:xxx}" 里冒号后面的格式说明，结果存在 formatter 对象上
+//   format —— 把对象写到输出迭代器
+//
+// 支持：
+//   {}    完整打印（等价于 to_string()）
+//   {:m}  只打印元信息（等价于 meta_string()）
+// ---------------------------------------------------------------------------
+template <>
+struct std::formatter<inference::Tensor> {
+    bool meta_only = false;
+
+    constexpr auto parse(std::format_parse_context &ctx) {
+        auto it = ctx.begin();
+        if (it != ctx.end() && *it == 'm') {
+            meta_only = true;
+            ++it;
+        }
+        return it;
+    }
+
+    auto format(const inference::Tensor &t, std::format_context &ctx) const {
+        return std::format_to(ctx.out(), "{}", meta_only ? t.meta_string() : t.to_string());
+    }
+};

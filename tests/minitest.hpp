@@ -2,8 +2,10 @@
 #include <cmath>
 #include <cstdio>
 #include <exception>
+#include <format>
 #include <functional>
 #include <string>
+#include <utility>
 #include <vector>
 #if defined(_WIN32)
 #include <io.h>
@@ -25,6 +27,9 @@ inline const char *ansi_green() {
 }
 inline const char *ansi_red() {
     return use_color() ? "\033[31m" : "";
+}
+inline const char *ansi_cyan() {
+    return use_color() ? "\033[36m" : "";
 }
 inline const char *ansi_reset() {
     return use_color() ? "\033[0m" : "";
@@ -123,6 +128,54 @@ inline void report_check_pass(const std::string &detail) {
     std::printf("        %sPASS%s  %s\n", ansi_green(), ansi_reset(), detail.c_str());
 }
 
+inline void report_print(const std::string &loc, std::string text) {
+    while (!text.empty() && (text.back() == '\n' || text.back() == '\r')) {
+        text.pop_back();
+    }
+    const char *c = ansi_cyan();
+    const char *r = ansi_reset();
+    if (text.find('\n') == std::string::npos) {
+        std::printf("        %sINFO%s  %s @ %s\n", c, r, text.c_str(), loc.c_str());
+        return;
+    }
+    std::printf("        %sINFO%s  @ %s\n", c, r, loc.c_str());
+    std::size_t start = 0;
+    while (start < text.size()) {
+        const auto end = text.find('\n', start);
+        const std::string line =
+            text.substr(start, end == std::string::npos ? std::string::npos : end - start);
+        std::printf("          %s\n", line.c_str());
+        if (end == std::string::npos) {
+            break;
+        }
+        start = end + 1;
+    }
+}
+
+// PRINT 不能写成 std::format(__VA_ARGS__)：宏参数对 clang 不是
+// consteval 常量。做成函数对象后，格式串是真正的调用实参。
+struct printer {
+    std::string loc;
+
+    template <typename... Args>
+    void operator()(std::format_string<Args...> fmt, Args &&...args) const {
+        report_print(loc, std::format(fmt, std::forward<Args>(args)...));
+    }
+};
+
+template <typename T>
+void print_expr_at(const std::string &loc, const char *expr, const T &value) {
+    std::string body = std::vformat("{}", std::make_format_args(value));
+    while (!body.empty() && (body.back() == '\n' || body.back() == '\r')) {
+        body.pop_back();
+    }
+    if (body.find('\n') == std::string::npos) {
+        report_print(loc, std::string(expr) + " = " + body);
+    } else {
+        report_print(loc, std::string(expr) + " =\n" + body);
+    }
+}
+
 inline std::string at(const char *file, int line) {
     return std::string(file) + ":" + std::to_string(line);
 }
@@ -175,4 +228,12 @@ inline std::string at(const char *file, int line) {
             throw ::minitest::failure("期望 " #expr " 抛异常，但它没有 @ " + loc);                 \
         }                                                                                          \
         ::minitest::report_check_pass(std::string("CHECK_THROWS(" #expr ") @ ") + loc);            \
+    } while (0)
+
+#define PRINT ::minitest::printer{::minitest::at(__FILE__, __LINE__)}
+
+#define PRINT_EXPR(...)                                                                            \
+    do {                                                                                           \
+        ::minitest::print_expr_at(::minitest::at(__FILE__, __LINE__), #__VA_ARGS__,                 \
+                                  (__VA_ARGS__));                                                  \
     } while (0)

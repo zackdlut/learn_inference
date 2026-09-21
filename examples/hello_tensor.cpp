@@ -18,7 +18,7 @@ void section(const char *title) {
 int main() {
     section("1. 造一个 2x3 的张量");
     Tensor a = Tensor::from({2, 3}, {1, 2, 3, 4, 5, 6});
-    std::cout << a.to_string();
+    std::cout << std::format("{}", a);
     std::cout << "内存里实际的排列顺序（行优先）：\n";
     for (float v : a.data())
         std::cout << std::format("{} ", v);
@@ -26,7 +26,7 @@ int main() {
 
     section("2. reshape：说明书变了，内存没动");
     Tensor b = a.reshape({3, 2});
-    std::cout << b.to_string();
+    std::cout << std::format("{}", b);
     std::cout << "改 b(0,0)=99 之后，a 也会变 —— 它们共享同一块内存：\n";
     b(0, 0) = 99.0F;
     std::cout << std::format("a(0,0) = {}\n", a(0, 0));
@@ -34,14 +34,14 @@ int main() {
 
     section("3. transpose：只交换 shape 和 stride");
     Tensor at = a.transpose(0, 1);
-    std::cout << std::format("原张量 : {}\n", a.meta_string());
-    std::cout << std::format("转置后 : {}\n", at.meta_string());
-    std::cout << at.to_string();
+    std::cout << std::format("原张量 : {:m}\n", a);
+    std::cout << std::format("转置后 : {:m}\n", at);
+    std::cout << std::format("{}", at);
     std::cout << "注意 contiguous=false：逻辑上是 3x2，但内存顺序还是原来的 1 2 3 4 5 6。\n";
 
     section("4. contiguous：把 view 落实成真实内存（唯一发生拷贝的地方）");
     Tensor atc = at.contiguous();
-    std::cout << std::format("{}\n", atc.meta_string());
+    std::cout << std::format("{:m}\n", atc);
     std::cout << "内存顺序现在真的变了：";
     for (float v : atc.data())
         std::cout << std::format("{} ", v);
@@ -49,10 +49,10 @@ int main() {
 
     section("5. slice：把起点往后挪，再改一下这一维的长度");
     Tensor m = Tensor::arange(12).reshape({3, 4});
-    std::cout << m.to_string();
+    std::cout << std::format("{}", m);
     Tensor col = m.slice(1, 1, 3); // 取第 1~2 列
-    std::cout << std::format("取第 1~2 列 -> {}\n", col.meta_string());
-    std::cout << col.to_string();
+    std::cout << std::format("取第 1~2 列 -> {:m}\n", col);
+    std::cout << std::format("{}", col);
 
     section("6. 越界和形状错误会立刻抛异常，而不是悄悄读脏数据");
     try {

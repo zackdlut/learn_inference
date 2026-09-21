@@ -46,5 +46,18 @@ add_subdirectory(examples)
 add_subdirectory(misc)
 
 # 测试用例
+# 必须在 enable_testing() 之前：`make test` 会把这些参数传给 ctest。
+# 直接敲 `ctest` 不会读这个变量，stdout 可见性由 tests/run_visible.cmake 负责。
+list(APPEND CMAKE_CTEST_ARGUMENTS
+    --output-on-failure
+    --test-output-size-passed 10485760
+    --test-output-size-failed 10485760
+)
 enable_testing()
 add_subdirectory(tests)
+
+# ctest 启动时读取 build/CTestCustom.cmake，取消通过用例 1KiB 截断。
+file(WRITE "${CMAKE_BINARY_DIR}/CTestCustom.cmake" [=[
+set(CTEST_CUSTOM_MAXIMUM_PASSED_TEST_OUTPUT_SIZE 10485760)
+set(CTEST_CUSTOM_MAXIMUM_FAILED_TEST_OUTPUT_SIZE 10485760)
+]=])

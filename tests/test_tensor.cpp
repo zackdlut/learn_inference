@@ -1,5 +1,7 @@
 #include "inference/tensor.hpp"
 #include "minitest.hpp"
+#include <format>
+#include <string>
 
 using namespace inference;
 
@@ -176,4 +178,14 @@ TEST(slice_moves_offset) {
 TEST(bad_construction_throws) {
     CHECK_THROWS(Tensor::from({2, 3}, {1, 2, 3})); // 数据只有 3 个，形状要 6 个
     CHECK_THROWS(Tensor::zeros({2, 3}).reshape({5}));
+}
+
+TEST(tensor_formatter) {
+    Tensor t = Tensor::from({2, 3}, {1, 2, 3, 4, 5, 6});
+    PRINT("{}", t);
+    PRINT("{:m}", t);
+    PRINT_EXPR(t.numel());
+    CHECK(std::format("{}", t) == t.to_string());
+    CHECK(std::format("{:m}", t) == t.meta_string());
+    CHECK(std::format("x{}y", t) == "x" + t.to_string() + "y");
 }
