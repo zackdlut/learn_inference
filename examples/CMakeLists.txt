@@ -8,3 +8,4 @@ function(add_example name)
 endfunction()
 
 add_example(hello_tensor)
+add_example(hello_ops)
