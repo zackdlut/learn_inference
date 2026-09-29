@@ -33,7 +33,7 @@ if(INFERENCE_NATIVE_API)
 endif()
 
 # STEP 1. 核心库: 张量计算
-add_library(inference
+add_library(inference SHARED
     src/tensor.cpp
     src/ops.cpp
     src/kernel.cpp

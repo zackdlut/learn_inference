@@ -6,3 +6,6 @@ compile_commands.json
 .cache/
 *.o
 *.a
+*.__pycache__
+*.pyc
+*.gz
