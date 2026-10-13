@@ -10,7 +10,8 @@
 #include <string>
 #include <vector>
 
-namespace inference {
+namespace inference
+{
 // 定义int64类型
 using int64 = std::int64_t;
 // 定义形状：shape = {2, 3} 表示 2 行 3 列。标量的 shape 是空的 {} 阶段1临时使用，后续定义Shape类
@@ -26,7 +27,8 @@ int64 numel_of(const Shape &shape);
 // 多个张量可以共享同一块内存，各自拿着不同的说明书 —— 这就是 view(视图)，
 // 转置、切片、reshape 都靠它做到零拷贝。
 // ---------------------------------------------------------------------------
-class Tensor {
+class Tensor
+{
   public:
     //=============================================================================
     // 张量构造函数
@@ -49,31 +51,38 @@ class Tensor {
     // 获取张量元信息
     //=============================================================================
     // 获取张量形状
-    [[nodiscard]] const Shape &shape() const noexcept {
+    [[nodiscard]] const Shape &shape() const noexcept
+    {
         return shape_;
     }
     // 获取张量步长
-    [[nodiscard]] const Shape &strides() const noexcept {
+    [[nodiscard]] const Shape &strides() const noexcept
+    {
         return strides_;
     }
     // 获取张量维度
-    [[nodiscard]] int64 dim(int64 i) const noexcept {
+    [[nodiscard]] int64 dim(int64 i) const noexcept
+    {
         return shape_.at(static_cast<std::size_t>(i));
     }
     // 获取张量维度数量
-    [[nodiscard]] int64 ndim() const noexcept {
+    [[nodiscard]] int64 ndim() const noexcept
+    {
         return static_cast<int64>(shape_.size());
     }
     // 获取张量元素数量
-    [[nodiscard]] int64 numel() const noexcept {
+    [[nodiscard]] int64 numel() const noexcept
+    {
         return numel_;
     }
     // 获取张量数据类型
-    [[nodiscard]] DType dtype() const noexcept {
+    [[nodiscard]] DType dtype() const noexcept
+    {
         return dtype_;
     }
     // 获取张量是否为空
-    [[nodiscard]] bool empty() const noexcept {
+    [[nodiscard]] bool empty() const noexcept
+    {
         return numel_ == 0;
     }
     [[nodiscard]] bool is_contiguous() const noexcept;
@@ -84,12 +93,14 @@ class Tensor {
     [[nodiscard]] std::span<const float> data() const;
 
     // 获取张量元素
-    template <std::integral... Index> [[nodiscard]] float &operator()(Index... index) {
+    template <std::integral... Index> [[nodiscard]] float &operator()(Index... index)
+    {
         const int64 raw[] = {static_cast<int64>(index)...};
         return raw_ptr()[offset_of(std::span<const int64>{raw, sizeof...(Index)})];
     }
     // 获取张量元素
-    template <std::integral... Index> [[nodiscard]] const float &operator()(Index... index) const {
+    template <std::integral... Index> [[nodiscard]] const float &operator()(Index... index) const
+    {
         const int64 raw[] = {static_cast<int64>(index)...};
         return raw_ptr()[offset_of(std::span<const int64>{raw, sizeof...(Index)})];
     }
@@ -119,10 +130,12 @@ class Tensor {
     int64 numel_ = 0;
     DType dtype_ = DType::FP32;
 
-    [[nodiscard]] float *raw_ptr() noexcept {
+    [[nodiscard]] float *raw_ptr() noexcept
+    {
         return reinterpret_cast<float *>(data_.get());
     }
-    [[nodiscard]] const float *raw_ptr() const noexcept {
+    [[nodiscard]] const float *raw_ptr() const noexcept
+    {
         return reinterpret_cast<const float *>(data_.get());
     }
     [[nodiscard]] int64 offset_of(std::span<const int64> index) const;
@@ -141,20 +154,23 @@ class Tensor {
 //   {}    完整打印（等价于 to_string()）
 //   {:m}  只打印元信息（等价于 meta_string()）
 // ---------------------------------------------------------------------------
-template <>
-struct std::formatter<inference::Tensor> {
+template <> struct std::formatter<inference::Tensor>
+{
     bool meta_only = false;
 
-    constexpr auto parse(std::format_parse_context &ctx) {
+    constexpr auto parse(std::format_parse_context &ctx)
+    {
         auto it = ctx.begin();
-        if (it != ctx.end() && *it == 'm') {
+        if (it != ctx.end() && *it == 'm')
+        {
             meta_only = true;
             ++it;
         }
         return it;
     }
 
-    auto format(const inference::Tensor &t, std::format_context &ctx) const {
+    auto format(const inference::Tensor &t, std::format_context &ctx) const
+    {
         return std::format_to(ctx.out(), "{}", meta_only ? t.meta_string() : t.to_string());
     }
 };

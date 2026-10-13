@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>MNIST MLP · 一个 batch 的训练与推理（矩阵形状示意）</title>
+<style>
+  :root {
+    --paper: #fbfaf6; --ink: #222; --muted: #6b6b6b; --line: #e4e1d8;
+    --hand: "Comic Sans MS", "Segoe Print", "Kalam", "Xiaolai SC", cursive;
+    --mono: "JetBrains Mono", Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: #ecebe6; color: var(--ink); font-family: system-ui, "PingFang SC", "Microsoft YaHei", sans-serif; }
+  main { max-width: 1100px; margin: 0 auto; padding: 24px 16px 60px; }
+  h1 { font-family: var(--hand); font-size: 1.6rem; margin: 0 0 6px; }
+  .sub { color: var(--muted); margin: 0 0 18px; line-height: 1.6; }
+  h2 { font-family: var(--hand); font-size: 1.3rem; margin: 34px 0 10px; padding-bottom: 4px; border-bottom: 2px dashed #bbb; }
+  .card { background: var(--paper); border: 1px solid var(--line); border-radius: 6px; padding: 14px 18px 12px; margin: 12px 0; box-shadow: 0 1px 3px rgba(0,0,0,.06); }
+  .card h3 { font-family: var(--hand); margin: 0 0 4px; font-size: 1.08rem; }
+  .fig { overflow-x: auto; }
+  .fig svg { display: block; }
+  pre { font-family: var(--mono); font-size: 12.5px; background: #f1efe8; border-left: 3px solid #c9c3b3; padding: 6px 10px; margin: 6px 0; overflow-x: auto; }
+  .note { font-size: 13.5px; line-height: 1.7; color: #333; margin: 4px 0 0; }
+  .legend { display: flex; flex-wrap: wrap; gap: 14px; font-size: 13px; margin: 6px 0 4px; }
+  .legend span { display: inline-flex; align-items: center; gap: 6px; }
+  .legend i { width: 18px; height: 12px; border: 1.5px solid; border-radius: 2px; display: inline-block; }
+  table { border-collapse: collapse; font-size: 13px; margin-top: 6px; }
+  th, td { border: 1px solid var(--line); padding: 4px 10px; text-align: left; }
+  th { background: #f1efe8; }
+  code { font-family: var(--mono); font-size: 12.5px; }
+  .red { color: #d23c3c; font-weight: 600; }
+</style>
+</head>
+<body>
+<main>
+  <h1>MNIST MLP：一个 batch 的训练过程 &amp; 推理</h1>
+  <p class="sub">
+    对应 <code>tools/train_mnist_numpy.py</code>：<code>784 → 128 (ReLU) → 10 (softmax)</code>，
+    <code>batch_size B = 100</code>，<code>lr = 0.1</code>。方块大小按 √维度 缩放，只表示相对大小。
+    <span class="red">红色的维度</span> 是矩阵乘法中被“对齐并求和消掉”的内维。
+  </p>
+  <div class="legend" id="legend"></div>
+
+  <div id="content"></div>
+</main>
+
+<script>
+const KIND = {
+  data:  { name: "输入数据",     stroke: "#2f6fd6", fill: "#e3edfc" },
+  param: { name: "参数 W / b",   stroke: "#d98a00", fill: "#fdf0d6" },
+  act:   { name: "中间激活",     stroke: "#239a6a", fill: "#dff4ea" },
+  loss:  { name: "Loss 相关",    stroke: "#7c4ddb", fill: "#ece4fb" },
+  grad:  { name: "梯度",         stroke: "#d23c3c", fill: "#fbe3e3" },
+  mask:  { name: "0/1 掩码",     stroke: "#777",    fill: "#ececec" },
+  out:   { name: "预测结果",     stroke: "#0f8b9c", fill: "#dcf3f6" },
+};
+const HL = "#d23c3c";
+
+const M = (r, c, name, kind, opt = {}) => ({ k: "m", r, c, name, kind, ...opt });
+const V = (n, name, kind, opt = {}) => M(1, n, name, kind, opt);
+const O = (s) => ({ k: "o", s });
+const A = (s) => ({ k: "a", s });
+
+const SECTIONS = [
+  { title: "一、前向传播（Forward）", steps: [
+    { title: "① 乘以权重：x @ W₁ᵀ",
+      items: [M(100, 784, "x_batch", "data", { hc: 1 }), O("@"), M(784, 128, "W₁ᵀ", "param", { hr: 1 }), O("="), M(100, 128, "x @ W₁ᵀ", "act")],
+      code: "z1 = x @ self.W1.T + self.b1",
+      note: "W₁ 在代码里存的形状是 (128, 784)，即 (out, in)，和 nn.Linear 一致；转置后 W₁ᵀ 是 (784, 128)。内维 784 对齐后被求和消掉：z[b, j] = Σᵢ x[b, i] · W₁[j, i]。结果每一行对应一张图片，每一列对应一个隐藏神经元。" },
+    { title: "② 加偏置（广播）",
+      items: [M(100, 128, "x @ W₁ᵀ", "act"), O("+"), V(128, "b₁", "param"), O("="), M(100, 128, "z₁", "act")],
+      code: "z1 = ... + self.b1      # b1.shape = (128,)",
+      note: "b₁ 只有一行 (128,)，NumPy 把它广播复制到 100 行上，也就是每个样本加的是同一组偏置。" },
+    { title: "③ ReLU（逐元素，形状不变）",
+      items: [M(100, 128, "z₁", "act"), A("ReLU: max(0, ·)"), M(100, 128, "h₁", "act")],
+      code: "h1 = self.relu(z1)",
+      note: "负数变 0，正数保持不变。z₁ 要保留下来，反向传播时用 (z₁ > 0) 当掩码。" },
+    { title: "④ 第二层：h₁ @ W₂ᵀ + b₂",
+      items: [M(100, 128, "h₁", "act", { hc: 1 }), O("@"), M(128, 10, "W₂ᵀ", "param", { hr: 1 }), O("+"), V(10, "b₂", "param"), O("="), M(100, 10, "z₂ (logits)", "act")],
+      code: "z2 = h1 @ self.W2.T + self.b2      # W2.shape = (10, 128)",
+      note: "内维 128 被消掉，输出 100 × 10，即每张图片得到 10 个类别的原始分数（logits）。" },
+    { title: "⑤ Softmax（按行归一化）",
+      items: [M(100, 10, "z₂", "act"), A("softmax 按行"), M(100, 10, "p", "act")],
+      code: "x = x - max(x, axis=1)\np = exp(x) / sum(exp(x), axis=1)",
+      note: "每一行单独做：p[b, k] = e^{z₂[b,k]} / Σⱼ e^{z₂[b,j]}，所以每一行加起来等于 1，可以看成这张图属于 0~9 的概率。先减去行最大值只是为了防止 exp 溢出，结果不变。" },
+  ]},
+  { title: "二、计算 Loss（交叉熵）", steps: [
+    { title: "⑥ 标签变成 one-hot",
+      items: [M(100, 1, "y_batch (0~9)", "data"), A("one-hot"), M(100, 10, "Y", "loss")],
+      code: "y_onehot = zeros_like(p)\ny_onehot[arange(B), y_batch] = 1.0",
+      note: "例如标签是 7，就变成 [0,0,0,0,0,0,0,1,0,0]。Y 和 p 形状完全一样：(100, 10)。" },
+    { title: "⑦ 取出正确类别的概率 → −log → 求平均",
+      items: [M(100, 10, "p", "act"), O("⊙"), M(100, 10, "Y", "loss"), A("按行求和"), M(100, 1, "p[b, y_b]", "loss"), A("−log, 求平均"), M(1, 1, "L", "loss")],
+      code: "loss += -np.log(p[np.arange(B), y_batch] + 1e-9).sum()",
+      note: "L = −(1/B) · Σ_b log p[b, y_b]。p ⊙ Y 后每行只剩正确类别那一个数，等价于代码里直接用花式索引取 p[b, y_b]。正确类别概率越接近 1，−log 越接近 0；越接近 0，loss 越大。代码先把整个 epoch 的 loss 累加，最后再除以 n 用来打印；1e-9 防止 log(0)。" },
+  ]},
+  { title: "三、反向传播（Backward）：从 L 往回求每个参数的梯度", steps: [
+    { title: "⑧ 输出层误差 δ₂ = ∂L/∂z₂",
+      items: [M(100, 10, "p", "act"), O("−"), M(100, 10, "Y", "loss"), A("÷ B"), M(100, 10, "δ₂", "grad")],
+      code: "delta = (p - y_onehot) / batch_size",
+      note: "softmax + 交叉熵 合在一起求导，结果非常简洁：∂L/∂z₂ = (p − Y) / B。除以 B 是因为 loss 是对 batch 求平均。直观理解：正确类别位置是 p − 1（负数，要把分数推高），其他位置是 p（正数，要把分数压低）。" },
+    { title: "⑨ dW₂ = δ₂ᵀ @ h₁",
+      items: [M(10, 100, "δ₂ᵀ", "grad", { hc: 1 }), O("@"), M(100, 128, "h₁", "act", { hr: 1 }), O("="), M(10, 128, "dW₂", "grad")],
+      code: "dW2 = delta.T @ h1",
+      note: "这次被消掉的内维是 batch = 100：dW₂[k, j] = Σ_b δ₂[b, k] · h₁[b, j]，也就是把 100 个样本各自的梯度加起来（已经除过 B，所以实际是平均值）。结果形状 (10, 128) 正好等于 W₂ 的形状。" },
+    { title: "⑩ db₂ = δ₂ 沿 batch 求和",
+      items: [M(100, 10, "δ₂", "grad"), A("sum(axis=0)"), V(10, "db₂", "grad")],
+      code: "db2 = delta.sum(axis=0)",
+      note: "前向时 b₂ 被广播到了 100 行，所以反向时要把 100 行的梯度加回到一行，形状 (10,) 等于 b₂。" },
+    { title: "⑪ 误差传回隐藏层：δ₂ @ W₂",
+      items: [M(100, 10, "δ₂", "grad", { hc: 1 }), O("@"), M(10, 128, "W₂", "param", { hr: 1 }), O("="), M(100, 128, "∂L/∂h₁", "grad")],
+      code: "delta @ self.W2",
+      note: "前向用的是 W₂ᵀ，反向就用 W₂（不转置）。内维 10 被消掉，误差从 10 个输出“分摊”回 128 个隐藏神经元。注意这里要用更新之前的 W₂。" },
+    { title: "⑫ 穿过 ReLU：乘以掩码 (z₁ > 0)",
+      items: [M(100, 128, "∂L/∂h₁", "grad"), O("⊙"), M(100, 128, "(z₁ > 0)", "mask"), O("="), M(100, 128, "δ₁", "grad")],
+      code: "delta = (delta @ self.W2) * (z1 > 0)",
+      note: "ReLU 的导数：z₁ > 0 的位置是 1，否则是 0。前向被 ReLU 截成 0 的神经元，反向梯度也传不过去。⑪⑫ 在代码里是同一行。" },
+    { title: "⑬ dW₁ = δ₁ᵀ @ x",
+      items: [M(128, 100, "δ₁ᵀ", "grad", { hc: 1 }), O("@"), M(100, 784, "x_batch", "data", { hr: 1 }), O("="), M(128, 784, "dW₁", "grad")],
+      code: "dW1 = delta.T @ x_batch",
+      note: "和 ⑨ 一样，内维 batch = 100 被求和消掉，结果 (128, 784) 等于 W₁ 的形状。" },
+    { title: "⑭ db₁ = δ₁ 沿 batch 求和",
+      items: [M(100, 128, "δ₁", "grad"), A("sum(axis=0)"), V(128, "db₁", "grad")],
+      code: "db1 = delta.sum(axis=0)",
+      note: "形状 (128,) 等于 b₁。规律：每个梯度的形状一定和对应参数的形状完全相同。" },
+  ]},
+  { title: "四、参数更新（SGD）", steps: [
+    { title: "⑮ W ← W − lr · dW（四个参数都这样做）",
+      items: [M(128, 784, "W₁", "param"), O("− 0.1 ×"), M(128, 784, "dW₁", "grad"), O("="), M(128, 784, "W₁ (新)", "param")],
+      code: "self.W1 -= lr * dW1\nself.b1 -= lr * db1\nself.W2 -= lr * dW2\nself.b2 -= lr * db2",
+      note: "逐元素相减，形状不变。到这里一个 batch 的训练就结束了：前向 → loss → 反向 → 更新。60000 张训练图 / 100 = 每个 epoch 600 次更新，默认 12 个 epoch 共 7200 次。" },
+  ]},
+  { title: "五、推理（Inference）：只走前向，不算 loss、不反传、不更新", steps: [
+    { title: "⑯ 前向 ①~④ → argmax",
+      items: [M(100, 784, "x_test", "data", { rl: "N" }), A("①②③④ 前向"), M(100, 10, "z₂", "act", { rl: "N" }), A("argmax 按行"), M(100, 1, "pred (0~9)", "out", { rl: "N" })],
+      code: "def predict(self, x):\n    return np.argmax(self.forward(x)[2], axis=1)   # [2] 是 z2",
+      note: "N 可以是任意数量（evaluate 时一次传入 10000 张测试图）。softmax 不改变每行的大小顺序，所以推理时直接对 z₂ 取 argmax 即可，可以省掉 softmax。推理时 W、b 是固定的，也不需要标签 Y。准确率 = mean(pred == y_test)。" },
+  ]},
+];
+
+const S = (n) => (n <= 1 ? 12 : Math.round(8 * Math.sqrt(n)));
+const textW = (s, px) => [...s].reduce((w, ch) => w + (ch.charCodeAt(0) > 255 ? px : px * 0.6), 0);
+
+function braceH(x0, x1, y) {
+  const m = (x0 + x1) / 2, r = Math.min(5, (x1 - x0) / 4);
+  return `M${x0} ${y} Q${x0} ${y - 5} ${x0 + r} ${y - 5} L${m - r} ${y - 5} Q${m} ${y - 5} ${m} ${y - 10} Q${m} ${y - 5} ${m + r} ${y - 5} L${x1 - r} ${y - 5} Q${x1} ${y - 5} ${x1} ${y}`;
+}
+function braceV(x, y0, y1) {
+  const m = (y0 + y1) / 2, r = Math.min(5, (y1 - y0) / 4);
+  return `M${x} ${y0} Q${x - 5} ${y0} ${x - 5} ${y0 + r} L${x - 5} ${m - r} Q${x - 5} ${m} ${x - 10} ${m} Q${x - 5} ${m} ${x - 5} ${m + r} L${x - 5} ${y1 - r} Q${x - 5} ${y1} ${x} ${y1}`;
+}
+
+function renderRow(items) {
+  const LW = 46, PT = 40, PB = 34, GAP = 12;
+  const H = Math.max(24, ...items.filter((i) => i.k === "m").map((i) => S(i.r)));
+  let x = 6;
+  const parts = [];
+  for (const it of items) {
+    if (it.k === "m") {
+      const w = S(it.c), h = S(it.r);
+      const showR = it.r > 1, showC = it.c > 1;
+      const lw = showR ? LW : 6;
+      const nameW = textW(it.name, 14);
+      const bx = x + lw + Math.max(0, (nameW - w) / 2);
+      const by = PT + (H - h) / 2;
+      const k = KIND[it.kind];
+      parts.push(`<rect x="${bx}" y="${by}" width="${w}" height="${h}" rx="2" fill="${k.fill}" stroke="${k.stroke}" stroke-width="1.8"/>`);
+      if (showC) {
+        const col = it.hc ? HL : "#444";
+        parts.push(`<path d="${braceH(bx, bx + w, by - 4)}" fill="none" stroke="${col}" stroke-width="1.3"/>`);
+        parts.push(`<text x="${bx + w / 2}" y="${by - 18}" text-anchor="middle" class="dim" fill="${col}">${it.cl ?? it.c}</text>`);
+      }
+      if (showR) {
+        const col = it.hr ? HL : "#444";
+        parts.push(`<path d="${braceV(bx - 4, by, by + h)}" fill="none" stroke="${col}" stroke-width="1.3"/>`);
+        parts.push(`<text x="${bx - 17}" y="${by + h / 2 + 5}" text-anchor="end" class="dim" fill="${col}">${it.rl ?? it.r}</text>`);
+      }
+      parts.push(`<text x="${bx + w / 2}" y="${by + h + 20}" text-anchor="middle" class="nm">${it.name}</text>`);
+      x = Math.max(bx + w, bx + w / 2 + nameW / 2) + GAP;
+    } else if (it.k === "o") {
+      const w = Math.max(28, textW(it.s, 18) + 14);
+      parts.push(`<text x="${x + w / 2}" y="${PT + H / 2 + 7}" text-anchor="middle" class="op">${it.s}</text>`);
+      x += w;
+    } else {
+      const w = Math.max(80, textW(it.s, 13) + 24);
+      const cy = PT + H / 2;
+      parts.push(`<path d="M${x + 6} ${cy - 2} H${x + w - 10} M${x + 6} ${cy + 2} H${x + w - 10} M${x + w - 18} ${cy - 7} L${x + w - 6} ${cy} L${x + w - 18} ${cy + 7}" fill="none" stroke="#333" stroke-width="1.5"/>`);
+      parts.push(`<text x="${x + w / 2}" y="${cy - 10}" text-anchor="middle" class="ar">${it.s}</text>`);
+      x += w + 4;
+    }
+  }
+  const W = x + 6, Ht = PT + H + PB;
+  return `<svg width="${W}" height="${Ht}" viewBox="0 0 ${W} ${Ht}" xmlns="http://www.w3.org/2000/svg">
+    <style>
+      text { font-family: "Comic Sans MS","Segoe Print","Kalam",cursive,sans-serif; fill: #222; }
+      .dim { font-size: 13px; } .nm { font-size: 14px; } .op { font-size: 20px; font-weight: 600; } .ar { font-size: 13px; }
+      .dim[fill="${HL}"] { font-weight: 700; }
+    </style>${parts.join("")}</svg>`;
+}
+
+const esc = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;");
+
+document.getElementById("legend").innerHTML = Object.values(KIND)
+  .map((k) => `<span><i style="border-color:${k.stroke};background:${k.fill}"></i>${k.name}</span>`).join("");
+
+document.getElementById("content").innerHTML = SECTIONS.map((sec) => `
+  <h2>${sec.title}</h2>
+  ${sec.steps.map((st) => `
+    <div class="card">
+      <h3>${st.title}</h3>
+      <div class="fig">${renderRow(st.items)}</div>
+      <pre>${esc(st.code)}</pre>
+      <p class="note">${esc(st.note)}</p>
+    </div>`).join("")}
+`).join("") + `
+  <h2>六、形状速查</h2>
+  <div class="card">
+    <table>
+      <tr><th>参数</th><th>形状</th><th>前向用法</th><th>梯度</th><th>梯度计算</th></tr>
+      <tr><td>W₁</td><td>(128, 784)</td><td>x @ W₁ᵀ</td><td>dW₁ (128, 784)</td><td>δ₁ᵀ @ x</td></tr>
+      <tr><td>b₁</td><td>(128,)</td><td>广播相加</td><td>db₁ (128,)</td><td>δ₁.sum(axis=0)</td></tr>
+      <tr><td>W₂</td><td>(10, 128)</td><td>h₁ @ W₂ᵀ</td><td>dW₂ (10, 128)</td><td>δ₂ᵀ @ h₁</td></tr>
+      <tr><td>b₂</td><td>(10,)</td><td>广播相加</td><td>db₂ (10,)</td><td>δ₂.sum(axis=0)</td></tr>
+    </table>
+    <p class="note">记忆方法：前向是 <code>输入 @ Wᵀ</code>；反向求 dW 是 <code>误差ᵀ @ 该层输入</code>（把 batch 维求和消掉）；把误差往前传是 <code>误差 @ W</code>。</p>
+  </div>`;
+</script>
+</body>
+</html>

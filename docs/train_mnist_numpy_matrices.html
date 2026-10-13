@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>MNIST MLP — 矩阵逐元素 (B=100)</title>
+  <style>
+    :root {
+      --bg: #0f1117; --panel: #171a22; --stroke: #2a3140;
+      --text: #e8eaef; --muted: #8b93a7; --accent: #5b9fd4;
+      --pos: #7bc96f; --neg: #d47b9f; --hi: #e8c54b;
+      --mono: "IBM Plex Mono", Consolas, monospace;
+      --sans: "IBM Plex Sans", system-ui, sans-serif;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--bg); color: var(--text); font-family: var(--sans); font-size: 14px; }
+    header { padding: 1rem 1.25rem; border-bottom: 1px solid var(--stroke); }
+    header h1 { margin: 0; font-size: 1.15rem; }
+    header p { margin: 0.35rem 0 0; color: var(--muted); font-size: 0.85rem; }
+    code { font-family: var(--mono); color: var(--accent); font-size: 0.9em; }
+    .layout {
+      display: grid;
+      grid-template-columns: minmax(180px, 220px) minmax(0, 1fr) minmax(260px, 360px);
+      grid-template-rows: auto minmax(320px, 1fr);
+      height: calc(100vh - 72px);
+    }
+    @media (max-width: 1100px) { .layout { grid-template-columns: 1fr; grid-template-rows: auto auto auto 1fr; height: auto; } }
+    .toolbar {
+      grid-column: 1 / -1;
+      padding: 0.6rem 1rem;
+      border-bottom: 1px solid var(--stroke);
+      display: flex; flex-wrap: wrap; gap: 0.5rem 1rem; align-items: center;
+      background: #12151c;
+    }
+    button, select {
+      background: var(--panel); border: 1px solid var(--stroke); color: var(--text);
+      padding: 0.35rem 0.65rem; border-radius: 5px; font: inherit; cursor: pointer;
+    }
+    button.primary { background: var(--accent); color: #0f1117; border-color: var(--accent); font-weight: 600; }
+    .tensor-nav { padding: 0.5rem; border-right: 1px solid var(--stroke); overflow-y: auto; }
+    .tensor-nav h2 { font-size: 0.7rem; text-transform: uppercase; color: var(--muted); margin: 0.5rem 0 0.35rem; letter-spacing: 0.05em; }
+    .tensor-nav button {
+      display: block; width: 100%; text-align: left; margin-bottom: 4px; font-size: 0.8rem;
+    }
+    .tensor-nav button.on { border-color: var(--accent); color: var(--accent); }
+    #loadStatus { color: var(--accent); margin: 0.35rem 0 0; font-size: 0.85rem; }
+    noscript { color: #e8a54b; display: block; padding: 0.5rem 1rem; }
+    .center { padding: 0.5rem; overflow: auto; display: flex; flex-direction: column; gap: 0.5rem; min-height: 400px; }
+    .shape-bar { font-family: var(--mono); font-size: 0.75rem; color: var(--muted); }
+    .matrix-wrap {
+      overflow: auto; flex: 1; border: 1px solid var(--stroke); border-radius: 8px;
+      background: var(--panel); position: relative;
+    }
+    canvas#heatmap { display: block; }
+    .grid-table {
+      border-collapse: collapse; font-family: var(--mono); font-size: 10px;
+    }
+    .grid-table th { color: var(--muted); padding: 2px 4px; position: sticky; top: 0; background: var(--panel); }
+    .grid-table td {
+      padding: 2px 5px; border: 1px solid #1e2430; text-align: right; min-width: 52px;
+      cursor: crosshair;
+    }
+    .grid-table td.hi { background: #2a3548; outline: 1px solid var(--hi); }
+    .grid-table td.anim { background: #243328; outline: 1px solid var(--pos); }
+    aside {
+      border-left: 1px solid var(--stroke); padding: 0.75rem; overflow-y: auto;
+      font-size: 0.82rem; line-height: 1.55;
+    }
+    aside h3 { margin: 0 0 0.5rem; font-size: 0.85rem; }
+    .eq { font-family: var(--mono); background: var(--panel); border: 1px solid var(--stroke);
+      padding: 0.65rem; border-radius: 6px; margin: 0.5rem 0; font-size: 0.72rem; white-space: pre-wrap; word-break: break-all; }
+    .legend { display: flex; align-items: center; gap: 6px; font-size: 0.7rem; color: var(--muted); margin-top: 4px; }
+    .legend i { display: inline-block; width: 48px; height: 8px; border-radius: 2px;
+      background: linear-gradient(90deg, var(--neg), #333, var(--pos)); }
+    .idx-inputs { display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: center; font-size: 0.8rem; }
+    .idx-inputs label { color: var(--muted); }
+    .idx-inputs input { width: 56px; background: var(--panel); border: 1px solid var(--stroke); color: var(--text); padding: 2px 4px; border-radius: 4px; }
+    .progress { flex: 1; min-width: 120px; max-width: 280px; height: 6px; background: var(--stroke); border-radius: 3px; overflow: hidden; }
+    .progress > div { height: 100%; background: var(--accent); width: 0%; }
+  </style>
+  <script>
+    window.__setLoadStatus = function (msg) {
+      var el = document.getElementById('loadStatus');
+      if (el) el.textContent = msg;
+    };
+    window.__setLoadStatus('HTML 已加载，等待 train_mnist_numpy_matrices.js …');
+    window.addEventListener('error', function (e) {
+      var m = (e.message || e) + (e.filename ? ' @ ' + e.filename : '');
+      window.__setLoadStatus('脚本错误: ' + m);
+      var err = document.getElementById('bootErr');
+      if (err) { err.hidden = false; err.textContent = m; }
+    });
+  </script>
+</head>
+<body>
+  <noscript>需要启用 JavaScript。请用 Chrome/Edge 打开 http://127.0.0.1:8765/train_mnist_numpy_matrices.html</noscript>
+  <header>
+    <h1>train_mnist_numpy · 矩阵与逐元素更新</h1>
+    <p>第一个 mini-batch：<code>B = 100</code>，<code>x = train_x[0:100]</code>，与脚本默认 <code>batch_size=100</code>、<code>lr=0.1</code> 一致。点击单元格或播放动画查看每个元素的计算公式与数值。</p>
+    <p id="loadStatus">正在初始化…</p>
+    <p id="bootErr" hidden style="color:#e8a54b;margin:0.5rem 0 0;font-size:0.85rem;"></p>
+  </header>
+  <div class="layout">
+    <div class="toolbar">
+      <button type="button" class="primary" id="btnPlay">播放 SGD 逐元素</button>
+      <button type="button" id="btnPause">暂停</button>
+      <button type="button" id="btnFwdZ1">演示 z₁[b,j] 求和</button>
+      <button type="button" id="btnBwdW1">演示 dW₁[j,i] 求和</button>
+      <div class="progress" title="遍历进度"><div id="prog"></div></div>
+      <div class="idx-inputs">
+        <label>b<input type="number" id="inB" min="0" max="99" value="0" /></label>
+        <label>j<input type="number" id="inJ" min="0" max="127" value="0" /></label>
+        <label>i<input type="number" id="inI" min="0" max="783" value="0" /></label>
+        <label>k<input type="number" id="inK" min="0" max="9" value="7" /></label>
+        <label>播放间隔 ms<input type="number" id="inDelay" min="0" max="500" value="0" title="0=最快扫完全部 W₁ 元素" /></label>
+      </div>
+    </div>
+    <nav class="tensor-nav" id="nav">
+      <h2>数据</h2>
+      <button type="button" data-id="x">x_batch</button>
+      <button type="button" data-id="y">y_batch</button>
+      <h2>参数</h2>
+      <button type="button" data-id="W1">W₁ (更新前)</button>
+      <button type="button" data-id="b1">b₁ (更新前)</button>
+      <button type="button" data-id="W2">W₂ (更新前)</button>
+      <button type="button" data-id="b2">b₂ (更新前)</button>
+      <h2>前向</h2>
+      <button type="button" data-id="z1">z₁</button>
+      <button type="button" data-id="h1">h₁ = ReLU(z₁)</button>
+      <button type="button" data-id="z2">z₂</button>
+      <button type="button" data-id="p">p = softmax(z₂)</button>
+      <h2>反向</h2>
+      <button type="button" data-id="delta">δ</button>
+      <button type="button" data-id="dz1">δ_z₁</button>
+      <h2>梯度</h2>
+      <button type="button" data-id="dW2">dW₂</button>
+      <button type="button" data-id="db2">db₂</button>
+      <button type="button" data-id="dW1">dW₁</button>
+      <button type="button" data-id="db1">db₁</button>
+      <h2>SGD 后</h2>
+      <button type="button" data-id="W1a">W₁ (更新后)</button>
+    </nav>
+    <section class="center">
+      <div class="shape-bar" id="shapeBar"></div>
+      <div class="matrix-wrap" id="matrixWrap"></div>
+      <div class="legend"><i></i> 负 ← 0 → 正（按当前张量极值缩放）</div>
+    </section>
+    <aside>
+      <h3>当前张量说明</h3>
+      <p id="tensorDesc">正在连接数据文件…</p>
+      <h3>逐元素公式与数值</h3>
+      <div class="eq" id="eqBox">选择左侧张量并点击矩阵中的单元格。</div>
+      <h3>SGD 更新（权重/偏置）</h3>
+      <div class="eq" id="sgdBox">—</div>
+    </aside>
+  </div>
+
+  <script src="train_mnist_numpy_matrices.js"></script>
+</body>
+</html>

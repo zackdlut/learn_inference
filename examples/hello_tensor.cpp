@@ -11,11 +11,13 @@
 
 using inference::Tensor;
 
-void section(const char *title) {
+void section(const char *title)
+{
     std::cout << std::format("\n\033[36m===== {} =====\033[0m\n", title);
 }
 
-int main() {
+int main()
+{
     section("1. 造一个 2x3 的张量");
     Tensor a = Tensor::from({2, 3}, {1, 2, 3, 4, 5, 6});
     std::cout << std::format("{}", a);
@@ -55,9 +57,12 @@ int main() {
     std::cout << std::format("{}", col);
 
     section("6. 越界和形状错误会立刻抛异常，而不是悄悄读脏数据");
-    try {
+    try
+    {
         (void)m(5, 0);
-    } catch (const std::exception &e) {
+    }
+    catch (const std::exception &e)
+    {
         std::cout << std::format("捕获到：{}\n", e.what());
     }
 

@@ -2,7 +2,8 @@
 
 #include "inference/tensor.hpp"
 
-namespace inference::ops {
+namespace inference::ops
+{
 // ---------------------------------------------------------------------------
 // Ops 层：认识 Tensor，负责
 //   1. 校验形状，形状不对就抛带详细信息的异常

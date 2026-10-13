@@ -5,14 +5,16 @@
 
 using namespace inference;
 
-TEST(tensor_zeros) {
+TEST(tensor_zeros)
+{
     Tensor tensor = Tensor::zeros({2, 3});
     CHECK(tensor.shape() == Shape({2, 3}));
     CHECK(tensor.dtype() == DType::FP32);
     CHECK(tensor.numel() == 6);
 }
 
-TEST(tensor_ones) {
+TEST(tensor_ones)
+{
     Tensor tensor = Tensor::ones({2, 3});
     CHECK(tensor.shape() == Shape({2, 3}));
     CHECK(tensor.dtype() == DType::FP32);
@@ -22,7 +24,8 @@ TEST(tensor_ones) {
     CHECK_NEAR(tensor(0, 2), 1.0, 1e-6);
 }
 
-TEST(shape_and_stride) {
+TEST(shape_and_stride)
+{
     Tensor t = Tensor::zeros({2, 3, 4});
     CHECK(t.ndim() == 3);
     CHECK(t.numel() == 24);
@@ -31,7 +34,8 @@ TEST(shape_and_stride) {
     CHECK(t.is_contiguous());
 }
 
-TEST(scalar_tensor) {
+TEST(scalar_tensor)
+{
     Tensor t = Tensor::zeros({});
     CHECK(t.ndim() == 0);
     CHECK(t.numel() == 1);
@@ -40,7 +44,8 @@ TEST(scalar_tensor) {
     CHECK(t.is_contiguous());
 }
 
-TEST(indexing) {
+TEST(indexing)
+{
     Tensor t = Tensor::from({2, 3}, {1, 2, 3, 4, 5, 6});
     CHECK_NEAR(t(0, 0), 1.0, 1e-6);
     CHECK_NEAR(t(0, 1), 2.0, 1e-6);
@@ -50,14 +55,16 @@ TEST(indexing) {
     CHECK_NEAR(t(1, 2), 6.0, 1e-6);
 }
 
-TEST(indexing_out_of_range) {
+TEST(indexing_out_of_range)
+{
     Tensor t = Tensor::from({2, 3}, {1, 2, 3, 4, 5, 6});
     CHECK_THROWS(t(0, 3));
     CHECK_THROWS(t(2, 0));
     CHECK_THROWS(t(2, 3));
 }
 
-TEST(reshape) {
+TEST(reshape)
+{
     Tensor t = Tensor::from({2, 3}, {1, 2, 3, 4, 5, 6});
     Tensor b = t.reshape({3, 2});
     CHECK(b.numel() == 6);
@@ -66,7 +73,8 @@ TEST(reshape) {
     CHECK_NEAR(t(0, 1), 99.0, 1e-6);
 }
 
-TEST(reshape_infer_minus_one) {
+TEST(reshape_infer_minus_one)
+{
     Tensor t = Tensor::from({2, 3}, {1, 2, 3, 4, 5, 6});
 
     Tensor a = t.reshape({2, -1});
@@ -86,7 +94,8 @@ TEST(reshape_infer_minus_one) {
     CHECK(d.shape() == Shape({2, 3, 1}));
 }
 
-TEST(reshape_infer_minus_one_throws) {
+TEST(reshape_infer_minus_one_throws)
+{
     Tensor t = Tensor::from({2, 3}, {1, 2, 3, 4, 5, 6});
     CHECK_THROWS(t.reshape({2, -1, -1})); // 多于一个 -1
     CHECK_THROWS(t.reshape({5, -1}));     // 6 不能被 5 整除
@@ -94,7 +103,8 @@ TEST(reshape_infer_minus_one_throws) {
     CHECK_THROWS(t.reshape({0, -1}));     // 已知乘积为 0，无法推断
 }
 
-TEST(transpose) {
+TEST(transpose)
+{
     Tensor a = Tensor::from({2, 3}, {1, 2, 3, 4, 5, 6});
     Tensor at = a.transpose(0, 1);
     CHECK(at.numel() == 6);
@@ -105,7 +115,8 @@ TEST(transpose) {
     CHECK_THROWS(at.reshape({6}));
 }
 
-TEST(permute_reorders_axes) {
+TEST(permute_reorders_axes)
+{
     Tensor a = Tensor::arange(24).reshape({2, 3, 4});
     Tensor p = a.permute({2, 0, 1});
 
@@ -131,7 +142,8 @@ TEST(permute_reorders_axes) {
     CHECK_NEAR(pt(2, 1), 6.0, 1e-6);
 }
 
-TEST(permute_throws) {
+TEST(permute_throws)
+{
     Tensor a = Tensor::arange(24).reshape({2, 3, 4});
     CHECK_THROWS(a.permute({0, 1}));       // 长度不够
     CHECK_THROWS(a.permute({0, 1, 2, 3})); // 长度过长
@@ -140,7 +152,8 @@ TEST(permute_throws) {
     CHECK_THROWS(a.permute({-1, 0, 1}));   // 负数轴
 }
 
-TEST(contiguous_materializes) {
+TEST(contiguous_materializes)
+{
     Tensor a = Tensor::from({2, 3}, {1, 2, 3, 4, 5, 6});
     Tensor c = a.transpose(0, 1).contiguous();
 
@@ -150,12 +163,14 @@ TEST(contiguous_materializes) {
     CHECK(c.shape() == expect_shape);
     const float want[] = {1, 4, 2, 5, 3, 6};
     auto got = c.data();
-    for (std::size_t i = 0; i < 6; ++i) {
+    for (std::size_t i = 0; i < 6; ++i)
+    {
         CHECK_NEAR(got[i], want[i], 1e-6);
     }
 }
 
-TEST(slice_moves_offset) {
+TEST(slice_moves_offset)
+{
     Tensor a = Tensor::arange(12).reshape({3, 4});
     Tensor row = a.slice(0, 1, 2); // 取第 1 行，形状 (1, 4)
 
@@ -175,12 +190,14 @@ TEST(slice_moves_offset) {
     CHECK_NEAR(col_contiguous(2, 1), 11.0, 1e-6);
 }
 
-TEST(bad_construction_throws) {
+TEST(bad_construction_throws)
+{
     CHECK_THROWS(Tensor::from({2, 3}, {1, 2, 3})); // 数据只有 3 个，形状要 6 个
     CHECK_THROWS(Tensor::zeros({2, 3}).reshape({5}));
 }
 
-TEST(tensor_formatter) {
+TEST(tensor_formatter)
+{
     Tensor t = Tensor::from({2, 3}, {1, 2, 3, 4, 5, 6});
     PRINT("{}", t);
     PRINT("{:m}", t);

@@ -3,7 +3,8 @@
 #include <cstdint>
 #include <span>
 
-namespace inference::kernel {
+namespace inference::kernel
+{
 
 using int64 = std::int64_t;
 

@@ -18,16 +18,19 @@
 using inference::Tensor;
 namespace ops = inference::ops;
 
-template <typename... Args> void println(std::format_string<Args...> fmt, Args &&...args) {
+template <typename... Args> void println(std::format_string<Args...> fmt, Args &&...args)
+{
     std::cout << std::format(fmt, std::forward<Args>(args)...) << '\n';
 }
 
-void section(const char *title) {
+void section(const char *title)
+{
     std::cout << std::format("\n\033[36m===== {} =====\033[0m\n", title);
 }
 
 // 计时小工具：跑一次 fn，返回耗时（毫秒）
-template <typename F> double time_ms(F &&fn) {
+template <typename F> double time_ms(F &&fn)
+{
     const auto t0 = std::chrono::steady_clock::now();
     fn();
     const auto t1 = std::chrono::steady_clock::now();
@@ -35,10 +38,12 @@ template <typename F> double time_ms(F &&fn) {
 }
 
 // 故意写错的 softmax：直接照抄数学定义，不减最大值
-std::vector<float> naive_softmax_unsafe(const std::vector<float> &x) {
+std::vector<float> naive_softmax_unsafe(const std::vector<float> &x)
+{
     std::vector<float> out(x.size());
     float sum = 0.0F;
-    for (std::size_t i = 0; i < x.size(); ++i) {
+    for (std::size_t i = 0; i < x.size(); ++i)
+    {
         out[i] = std::exp(x[i]);
         sum += out[i];
     }
@@ -47,7 +52,8 @@ std::vector<float> naive_softmax_unsafe(const std::vector<float> &x) {
     return out;
 }
 
-int main() {
+int main()
+{
     // -------------------------------------------------------------------------
     section("1. 逐元素算子");
     Tensor x = Tensor::from({2, 3}, {-2, -1, 0, 1, 2, 3});

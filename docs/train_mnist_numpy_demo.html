@@ -1,0 +1,530 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>train_mnist_numpy.py — 动画演示</title>
+  <style>
+    :root {
+      --bg: #0f1117;
+      --panel: #171a22;
+      --stroke: #2a3140;
+      --text: #e8eaef;
+      --muted: #8b93a7;
+      --accent: #5b9fd4;
+      --accent2: #7bc96f;
+      --warn: #e8a54b;
+      --fwd: #5b9fd4;
+      --bwd: #d47b9f;
+      --font: "IBM Plex Sans", "Segoe UI", system-ui, sans-serif;
+      --mono: "IBM Plex Mono", "Consolas", monospace;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--font);
+      line-height: 1.5;
+      min-height: 100vh;
+    }
+    header {
+      padding: 1.25rem 1.5rem 0.5rem;
+      border-bottom: 1px solid var(--stroke);
+    }
+    header h1 {
+      margin: 0;
+      font-size: 1.25rem;
+      font-weight: 600;
+      letter-spacing: -0.02em;
+    }
+    header p {
+      margin: 0.35rem 0 0;
+      color: var(--muted);
+      font-size: 0.875rem;
+    }
+    header code { font-family: var(--mono); font-size: 0.8em; color: var(--accent); }
+    main {
+      display: grid;
+      grid-template-columns: 1fr 320px;
+      gap: 0;
+      min-height: calc(100vh - 72px);
+    }
+    @media (max-width: 960px) {
+      main { grid-template-columns: 1fr; }
+    }
+    .stage {
+      padding: 1rem 1.5rem 1.5rem;
+      display: flex;
+      flex-direction: column;
+      gap: 1rem;
+    }
+    .controls {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 0.5rem 1rem;
+    }
+    button {
+      background: var(--panel);
+      border: 1px solid var(--stroke);
+      color: var(--text);
+      padding: 0.45rem 0.9rem;
+      border-radius: 6px;
+      cursor: pointer;
+      font-family: inherit;
+      font-size: 0.875rem;
+    }
+    button:hover { border-color: var(--accent); }
+    button.primary { background: var(--accent); color: #0f1117; border-color: var(--accent); font-weight: 600; }
+    .speed label { font-size: 0.8rem; color: var(--muted); margin-right: 0.35rem; }
+    .speed input { width: 100px; vertical-align: middle; }
+    .phase-badge {
+      font-size: 0.75rem;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      padding: 0.2rem 0.5rem;
+      border-radius: 4px;
+      background: var(--panel);
+      border: 1px solid var(--stroke);
+    }
+    .phase-badge.fwd { border-color: var(--fwd); color: var(--fwd); }
+    .phase-badge.bwd { border-color: var(--bwd); color: var(--bwd); }
+    .phase-badge.data { border-color: var(--warn); color: var(--warn); }
+    .diagram-wrap {
+      background: var(--panel);
+      border: 1px solid var(--stroke);
+      border-radius: 10px;
+      padding: 0.5rem;
+      flex: 1;
+      min-height: 280px;
+    }
+    svg#net { width: 100%; height: auto; display: block; }
+    .node circle { fill: var(--bg); stroke: var(--stroke); stroke-width: 2; transition: stroke 0.25s, fill 0.25s; }
+    .node.active circle { stroke: var(--accent); fill: #1a2433; }
+    .node.back circle { stroke: var(--bwd); fill: #2a1a22; }
+    .node text { fill: var(--muted); font-size: 11px; font-family: var(--mono); }
+    .node .dim { fill: var(--text); font-size: 13px; font-weight: 600; }
+    .edge { stroke: var(--stroke); stroke-width: 1.5; fill: none; opacity: 0.35; }
+    .edge.lit { opacity: 1; stroke-width: 2.5; }
+    .edge.fwd.lit { stroke: var(--fwd); }
+    .edge.bwd.lit { stroke: var(--bwd); }
+    .pulse {
+      fill: var(--fwd);
+      opacity: 0;
+    }
+    .pulse.on { opacity: 1; animation: movePulse 0.9s ease-in-out infinite; }
+    .pulse.bwd.on { fill: var(--bwd); animation: movePulseBwd 0.9s ease-in-out infinite; }
+    @keyframes movePulse {
+      0% { offset-distance: 0%; opacity: 0; }
+      10% { opacity: 1; }
+      90% { opacity: 1; }
+      100% { offset-distance: 100%; opacity: 0; }
+    }
+    @keyframes movePulseBwd {
+      0% { offset-distance: 100%; opacity: 0; }
+      10% { opacity: 1; }
+      90% { opacity: 1; }
+      100% { offset-distance: 0%; opacity: 0; }
+    }
+    .formula {
+      background: var(--panel);
+      border: 1px solid var(--stroke);
+      border-radius: 10px;
+      padding: 0.75rem 1rem;
+      font-family: var(--mono);
+      font-size: 0.8rem;
+      color: var(--muted);
+      min-height: 3.2rem;
+    }
+    .formula strong { color: var(--text); font-weight: 500; }
+    .formula .hl { color: var(--accent); }
+    aside {
+      border-left: 1px solid var(--stroke);
+      padding: 1rem;
+      background: #12151c;
+      display: flex;
+      flex-direction: column;
+      gap: 1rem;
+      overflow-y: auto;
+    }
+    .digit-box {
+      text-align: center;
+    }
+    .digit-box canvas {
+      image-rendering: pixelated;
+      border: 1px solid var(--stroke);
+      border-radius: 6px;
+      background: #000;
+    }
+    .digit-label { font-size: 0.85rem; color: var(--muted); margin-top: 0.35rem; }
+    .digit-label span { color: var(--accent2); font-weight: 600; font-size: 1.1rem; }
+    .bars { display: flex; flex-direction: column; gap: 4px; }
+    .bar-row {
+      display: grid;
+      grid-template-columns: 1.2rem 1fr 2.5rem;
+      align-items: center;
+      gap: 6px;
+      font-size: 0.7rem;
+      font-family: var(--mono);
+      color: var(--muted);
+    }
+    .bar-row.target .bar-fill { background: var(--accent2); }
+    .bar-track { height: 8px; background: var(--stroke); border-radius: 2px; overflow: hidden; }
+    .bar-fill { height: 100%; background: var(--accent); width: 0%; transition: width 0.4s; }
+    .chart-box h3 {
+      margin: 0 0 0.5rem;
+      font-size: 0.8rem;
+      font-weight: 500;
+      color: var(--muted);
+    }
+    canvas.chart { width: 100%; height: 120px; display: block; border-radius: 6px; background: var(--panel); }
+    .caption { font-size: 0.65rem; color: var(--muted); margin-top: 0.25rem; }
+    .pipeline {
+      font-size: 0.75rem;
+      color: var(--muted);
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.35rem;
+    }
+    .pipeline span {
+      padding: 0.15rem 0.4rem;
+      border-radius: 4px;
+      background: var(--panel);
+      border: 1px solid transparent;
+    }
+    .pipeline span.on { border-color: var(--accent); color: var(--text); }
+    .progress-bar {
+      height: 4px;
+      background: var(--stroke);
+      border-radius: 2px;
+      overflow: hidden;
+      margin-top: 0.25rem;
+    }
+    .progress-bar > div {
+      height: 100%;
+      background: var(--accent);
+      width: 0%;
+      transition: width 0.15s linear;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>NumPy MNIST MLP 训练动画</h1>
+    <p>对应脚本 <code>tools/train_mnist_numpy.py</code>：784→128→10、ReLU、Softmax、交叉熵与 SGD 反传</p>
+  </header>
+  <main>
+    <section class="stage">
+      <div class="controls">
+        <button type="button" class="primary" id="btnPlay">播放</button>
+        <button type="button" id="btnPause">暂停</button>
+        <button type="button" id="btnStep">单步</button>
+        <div class="speed">
+          <label for="speed">速度</label>
+          <input type="range" id="speed" min="0.3" max="2.5" step="0.1" value="1" />
+        </div>
+        <span class="phase-badge data" id="phaseBadge">数据管线</span>
+      </div>
+      <div class="pipeline" id="pipeline"></div>
+      <div class="progress-bar"><div id="progressFill"></div></div>
+      <div class="diagram-wrap">
+        <svg id="net" viewBox="0 0 720 320" xmlns="http://www.w3.org/2000/svg">
+          <defs>
+            <path id="path-x-z1" d="M 120 160 L 280 160" />
+            <path id="path-z1-h1" d="M 280 160 L 360 160" />
+            <path id="path-h1-z2" d="M 360 160 L 480 160" />
+            <path id="path-z2-p" d="M 480 160 L 600 160" />
+          </defs>
+          <g class="edges"></g>
+          <g class="nodes">
+            <g class="node" id="n-x" transform="translate(60,160)"><circle r="28"/><text y="-38" text-anchor="middle">输入 x</text><text class="dim" y="5" text-anchor="middle">784</text></g>
+            <g class="node" id="n-z1" transform="translate(280,160)"><circle r="26"/><text y="-34" text-anchor="middle">z₁</text><text class="dim" y="5" text-anchor="middle">128</text></g>
+            <g class="node" id="n-h1" transform="translate(360,160)"><circle r="26"/><text y="-34" text-anchor="middle">h₁ ReLU</text><text class="dim" y="5" text-anchor="middle">128</text></g>
+            <g class="node" id="n-z2" transform="translate(480,160)"><circle r="26"/><text y="-34" text-anchor="middle">z₂</text><text class="dim" y="5" text-anchor="middle">10</text></g>
+            <g class="node" id="n-p" transform="translate(600,160)"><circle r="28"/><text y="-38" text-anchor="middle">p softmax</text><text class="dim" y="5" text-anchor="middle">10</text></g>
+          </g>
+          <g id="pulses"></g>
+          <text x="360" y="280" text-anchor="middle" fill="#8b93a7" font-size="12" font-family="IBM Plex Mono, monospace">W₁ (128×784) · W₂ (10×128) · lr = 0.1 · batch = 100</text>
+        </svg>
+      </div>
+      <div class="formula" id="formula">点击「播放」开始演示。</div>
+    </section>
+    <aside>
+      <div class="digit-box">
+        <canvas id="digit" width="112" height="112"></canvas>
+        <div class="digit-label">MNIST 样本 · 真值 <span id="trueLabel">—</span></div>
+      </div>
+      <div>
+        <h3 style="margin:0 0 0.5rem;font-size:0.8rem;color:var(--muted);font-weight:500;">未训练模型预测（He 初始化）</h3>
+        <div class="bars" id="probBars"></div>
+      </div>
+      <div class="chart-box">
+        <h3>训练曲线（子集 10k 样本 · 3 epoch 实测）</h3>
+        <canvas class="chart" id="lossChart" width="280" height="120"></canvas>
+        <canvas class="chart" id="accChart" width="280" height="120" style="margin-top:8px"></canvas>
+        <p class="caption">来源：本地运行 train_mnist_numpy.MLP.train</p>
+      </div>
+    </aside>
+  </main>
+  <script>
+const DEMO_DATA = {"sample":{"img":[0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.003921568859368563,0.10196078568696976,0.43529412150382996,0.7647058963775635,0.9019607901573181,0.11764705926179886,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.10980392247438431,0.41960784792900085,0.7647058963775635,0.9960784316062927,0.9960784316062927,0.9960784316062927,0.95686274766922,0.0784313753247261,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.18039216101169586,0.6549019813537598,0.9725490212440491,0.9960784316062927,0.8705882430076599,0.572549045085907,0.5882353186607361,0.9960784316062927,0.6823529601097107,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.2549019753932953,0.8745098114013672,0.9647058844566345,0.9960784316062927,0.6000000238418579,0.239215686917305,0.03921568766236305,0.0,0.1882352977991104,0.9960784316062927,0.5058823823928833,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.3333333432674408,0.686274528503418,0.6431372761726379,0.3137255012989044,0.007843137718737125,0.0,0.0,0.0,0.1882352977991104,0.9960784316062927,0.47058823704719543,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.7137255072593689,0.9960784316062927,0.062745101749897,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.8117647171020508,0.9960784316062927,0.062745101749897,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.8117647171020508,0.7921568751335144,0.0117647061124444,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.10980392247438431,0.9725490212440491,0.6666666865348816,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.41960784792900085,0.9960784316062927,0.239215686917305,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.6509804129600525,0.9882352948188782,0.11764705926179886,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.7490196228027344,0.8078431487083435,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.7490196228027344,0.8078431487083435,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.054901961237192154,0.9647058844566345,0.729411780834198,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.35686275362968445,0.9960784316062927,0.3019607961177826,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.686274528503418,0.9960784316062927,0.1882352977991104,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.686274528503418,0.9411764740943909,0.10588235408067703,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.843137264251709,0.8705882430076599,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.45098039507865906,1.0,0.5960784554481506,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.5254902243614197,1.0,0.2666666805744171,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0],"label":7,"probs_init":[0.11734014004468918,0.0987091138958931,0.13719439506530762,0.15282809734344482,0.16053377091884613,0.0749342292547226,0.06426273286342621,0.05030776560306549,0.07012038677930832,0.07376938313245773]},"history":[{"epoch":1,"train_loss":0.9313936233520508,"steps_per_epoch":79,"train_acc":0.8625,"test_acc":0.8558},{"epoch":2,"train_loss":0.433108925819397,"steps_per_epoch":79,"train_acc":0.888,"test_acc":0.888},{"epoch":3,"train_loss":0.35395294427871704,"steps_per_epoch":79,"train_acc":0.8945,"test_acc":0.8988}],"hyperparams":{"d_in":784,"d_hidden":128,"d_out":10,"batch_size":128,"lr":0.1,"epochs":12}};
+
+    const STEPS = [
+      { id: 'dl', phase: 'data', badge: 'data', pipe: ['download_data'], nodes: [], fwd: [], bwd: [],
+        text: '<strong>download_data()</strong> — 从 S3 / GCS 镜像下载 4 个 MNIST <span class="hl">.gz</span> 到 <code>data/mnist/</code>' },
+      { id: 'ld', phase: 'data', badge: 'data', pipe: ['download_data','load_data'], nodes: ['n-x'], fwd: [], bwd: [],
+        text: '<strong>load_data()</strong> — 解析 IDX：图像 <span class="hl">reshape (N,784)</span>，像素 <span class="hl">÷255</span> → float32' },
+      { id: 'fw1', phase: 'fwd', badge: 'fwd', pipe: ['train','forward'], nodes: ['n-x','n-z1'], fwd: ['x-z1'], bwd: [],
+        text: '<strong>forward</strong> — <span class="hl">z₁ = x @ W₁.T + b₁</span>，形状 (B, 128)' },
+      { id: 'fw2', phase: 'fwd', badge: 'fwd', pipe: ['train','forward'], nodes: ['n-z1','n-h1'], fwd: ['z1-h1'], bwd: [],
+        text: '<strong>ReLU</strong> — <span class="hl">h₁ = max(0, z₁)</span>' },
+      { id: 'fw3', phase: 'fwd', badge: 'fwd', pipe: ['train','forward'], nodes: ['n-h1','n-z2'], fwd: ['h1-z2'], bwd: [],
+        text: '<strong>forward</strong> — <span class="hl">z₂ = h₁ @ W₂.T + b₂</span>，形状 (B, 10)' },
+      { id: 'fw4', phase: 'fwd', badge: 'fwd', pipe: ['train','forward'], nodes: ['n-z2','n-p'], fwd: ['z2-p'], bwd: [],
+        text: '<strong>softmax</strong> — 按行减 max 再 exp 归一化，得到概率 <span class="hl">p</span>' },
+      { id: 'loss', phase: 'fwd', badge: 'fwd', pipe: ['train','loss'], nodes: ['n-p'], fwd: [], bwd: [],
+        text: '<strong>损失</strong> — 交叉熵：<span class="hl">−log(p[y] + 1e−9)</span>，对 batch 求和后在 epoch 末除以 N' },
+      { id: 'bw1', phase: 'bwd', badge: 'bwd', pipe: ['backward'], nodes: ['n-p','n-z2'], fwd: [], bwd: ['z2-p'],
+        text: '<strong>backward</strong> — <span class="hl">δ = (p − y_onehot) / B</span>' },
+      { id: 'bw2', phase: 'bwd', badge: 'bwd', pipe: ['backward'], nodes: ['n-z2','n-h1'], fwd: [], bwd: ['h1-z2'],
+        text: '<span class="hl">dW₂ = δ.T @ h₁</span>，<span class="hl">db₂ = sum(δ)</span>；δ_h = δ @ W₂' },
+      { id: 'bw3', phase: 'bwd', badge: 'bwd', pipe: ['backward'], nodes: ['n-h1','n-z1'], fwd: [], bwd: ['z1-h1'],
+        text: 'ReLU 掩码：<span class="hl">δ_z1 = δ_h ⊙ (z₁ &gt; 0)</span>' },
+      { id: 'bw4', phase: 'bwd', badge: 'bwd', pipe: ['backward'], nodes: ['n-z1','n-x'], fwd: [], bwd: ['x-z1'],
+        text: '<span class="hl">dW₁ = δ_z1.T @ x</span>，<span class="hl">db₁ = sum(δ_z1)</span>' },
+      { id: 'sgd', phase: 'bwd', badge: 'bwd', pipe: ['SGD'], nodes: ['n-x','n-z1','n-h1','n-z2','n-p'], fwd: [], bwd: [],
+        text: '<strong>SGD</strong> — <span class="hl">W ← W − lr·dW</span>，<span class="hl">b ← b − lr·db</span>（lr=0.1）' },
+      { id: 'epoch', phase: 'data', badge: 'data', pipe: ['evaluate','save'], nodes: [], fwd: [], bwd: [],
+        text: '每 epoch 记录 <strong>history</strong>（train_loss / train_acc / test_acc），完整训练 12 epoch 后 <strong>save</strong> 到 <code>mnist_mlp.inference</code>' },
+    ];
+
+    const PIPE_LABELS = {
+      download_data: '下载',
+      load_data: '加载',
+      train: 'train()',
+      forward: 'forward',
+      loss: 'CE loss',
+      backward: 'backward',
+      SGD: 'SGD 更新',
+      evaluate: 'evaluate',
+      save: 'save',
+    };
+
+    let stepIdx = 0;
+    let playing = false;
+    let timer = null;
+
+    const formulaEl = document.getElementById('formula');
+    const badgeEl = document.getElementById('phaseBadge');
+    const progressFill = document.getElementById('progressFill');
+    const pipelineEl = document.getElementById('pipeline');
+    const pulsesG = document.getElementById('pulses');
+    const edgesG = document.querySelector('.edges');
+
+    const edgeMap = {
+      'x-z1': { x1: 88, y1: 160, x2: 252, y2: 160 },
+      'z1-h1': { x1: 306, y1: 160, x2: 334, y2: 160 },
+      'h1-z2': { x1: 386, y1: 160, x2: 454, y2: 160 },
+      'z2-p': { x1: 506, y1: 160, x2: 572, y2: 160 },
+    };
+
+    function initEdges() {
+      Object.entries(edgeMap).forEach(([id, e]) => {
+        const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+        line.setAttribute('class', 'edge ' + id.split('-')[0]);
+        line.dataset.edge = id;
+        line.setAttribute('x1', e.x1);
+        line.setAttribute('y1', e.y1);
+        line.setAttribute('x2', e.x2);
+        line.setAttribute('y2', e.y2);
+        edgesG.appendChild(line);
+      });
+    }
+
+    function initPipeline() {
+      const keys = ['download_data','load_data','train','forward','loss','backward','SGD','evaluate','save'];
+      pipelineEl.innerHTML = keys.map(k => `<span data-p="${k}">${PIPE_LABELS[k]}</span>`).join('');
+    }
+
+    function drawDigit() {
+      const c = document.getElementById('digit');
+      const ctx = c.getContext('2d');
+      const img = DEMO_DATA.sample.img;
+      const w = 28, h = 28;
+      const scale = 4;
+      ctx.fillStyle = '#000';
+      ctx.fillRect(0, 0, c.width, c.height);
+      for (let i = 0; i < 784; i++) {
+        const v = Math.round(img[i] * 255);
+        ctx.fillStyle = `rgb(${v},${v},${v})`;
+        const row = Math.floor(i / w), col = i % w;
+        ctx.fillRect(col * scale, row * scale, scale, scale);
+      }
+      document.getElementById('trueLabel').textContent = DEMO_DATA.sample.label;
+    }
+
+    function drawProbBars() {
+      const el = document.getElementById('probBars');
+      const probs = DEMO_DATA.sample.probs_init;
+      const target = DEMO_DATA.sample.label;
+      el.innerHTML = probs.map((p, i) => `
+        <div class="bar-row${i === target ? ' target' : ''}">
+          <span>${i}</span>
+          <div class="bar-track"><div class="bar-fill" style="width:${(p * 100).toFixed(1)}%"></div></div>
+          <span>${(p * 100).toFixed(1)}%</span>
+        </div>`).join('');
+    }
+
+    function drawCharts() {
+      const hist = DEMO_DATA.history;
+      const epochs = hist.map(h => h.epoch);
+      const losses = hist.map(h => h.train_loss);
+      const testAcc = hist.map(h => h.test_acc);
+      const trainAcc = hist.map(h => h.train_acc);
+      plotLine('lossChart', epochs, [{ y: losses, color: '#5b9fd4', label: 'train_loss' }], 'Epoch', 'Loss', [0, Math.max(...losses) * 1.1]);
+      plotLine('accChart', epochs, [
+        { y: trainAcc, color: '#7bc96f', label: 'train_acc' },
+        { y: testAcc, color: '#e8a54b', label: 'test_acc' },
+      ], 'Epoch', 'Accuracy', [0.8, 1]);
+    }
+
+    function plotLine(canvasId, xs, series, xLabel, yLabel, yRange) {
+      const canvas = document.getElementById(canvasId);
+      const ctx = canvas.getContext('2d');
+      const W = canvas.width, H = canvas.height;
+      const pad = { l: 36, r: 8, t: 8, b: 22 };
+      ctx.clearRect(0, 0, W, H);
+      ctx.fillStyle = '#171a22';
+      ctx.fillRect(0, 0, W, H);
+      const n = xs.length;
+      if (n < 1) return;
+      const xMin = xs[0], xMax = xs[n - 1];
+      const [yMin, yMax] = yRange;
+      const tx = x => pad.l + ((x - xMin) / (xMax - xMin || 1)) * (W - pad.l - pad.r);
+      const ty = y => H - pad.b - ((y - yMin) / (yMax - yMin || 1)) * (H - pad.t - pad.b);
+      ctx.strokeStyle = '#2a3140';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(pad.l, H - pad.b);
+      ctx.lineTo(W - pad.r, H - pad.b);
+      ctx.stroke();
+      series.forEach(s => {
+        ctx.strokeStyle = s.color;
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        s.y.forEach((v, i) => {
+          const x = tx(xs[i]), y = ty(v);
+          if (i === 0) ctx.moveTo(x, y);
+          else ctx.lineTo(x, y);
+        });
+        ctx.stroke();
+        s.y.forEach((v, i) => {
+          ctx.fillStyle = s.color;
+          ctx.beginPath();
+          ctx.arc(tx(xs[i]), ty(v), 3, 0, Math.PI * 2);
+          ctx.fill();
+        });
+      });
+      ctx.fillStyle = '#8b93a7';
+      ctx.font = '10px IBM Plex Mono, monospace';
+      ctx.fillText(yLabel, 4, pad.t + 10);
+      ctx.fillText(xLabel, W - pad.r - 28, H - 6);
+    }
+
+    function clearPulse() {
+      pulsesG.innerHTML = '';
+    }
+
+    function addPulse(edgeId, backward) {
+      const e = edgeMap[edgeId];
+      if (!e) return;
+      const c = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+      c.setAttribute('class', 'pulse on' + (backward ? ' bwd' : ''));
+      c.setAttribute('r', 6);
+      const anim = document.createElementNS('http://www.w3.org/2000/svg', 'animateMotion');
+      anim.setAttribute('dur', (0.9 / speed()).toFixed(2) + 's');
+      anim.setAttribute('repeatCount', 'indefinite');
+      const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+      if (backward) {
+        path.setAttribute('d', `M ${e.x2} ${e.y2} L ${e.x1} ${e.y1}`);
+      } else {
+        path.setAttribute('d', `M ${e.x1} ${e.y1} L ${e.x2} ${e.y2}`);
+      }
+      anim.appendChild(path);
+      c.appendChild(anim);
+      pulsesG.appendChild(c);
+    }
+
+    function speed() {
+      return parseFloat(document.getElementById('speed').value) || 1;
+    }
+
+    function applyStep(idx) {
+      const s = STEPS[idx];
+      formulaEl.innerHTML = s.text;
+      badgeEl.textContent = s.phase === 'fwd' ? '前向' : s.phase === 'bwd' ? '反向' : '数据 / 训练';
+      badgeEl.className = 'phase-badge ' + s.badge;
+      progressFill.style.width = ((idx + 1) / STEPS.length * 100) + '%';
+
+      document.querySelectorAll('.node').forEach(n => {
+        n.classList.remove('active', 'back');
+        if (s.nodes.includes(n.id)) {
+          n.classList.add(s.phase === 'bwd' ? 'back' : 'active');
+        }
+      });
+      document.querySelectorAll('.edge').forEach(line => {
+        line.classList.remove('lit', 'fwd', 'bwd');
+        const id = line.dataset.edge;
+        if (s.fwd.includes(id)) line.classList.add('lit', 'fwd');
+        if (s.bwd.includes(id)) line.classList.add('lit', 'bwd');
+      });
+      document.querySelectorAll('.pipeline span').forEach(sp => {
+        sp.classList.toggle('on', s.pipe.includes(sp.dataset.p));
+      });
+      clearPulse();
+      s.fwd.forEach(id => addPulse(id, false));
+      s.bwd.forEach(id => addPulse(id, true));
+    }
+
+    function nextStep(wrap) {
+      applyStep(stepIdx);
+      stepIdx++;
+      if (stepIdx >= STEPS.length) {
+        stepIdx = wrap ? 0 : STEPS.length - 1;
+        if (!wrap) playing = false;
+      }
+    }
+
+    function tick() {
+      if (!playing) return;
+      nextStep(true);
+      timer = setTimeout(tick, 1400 / speed());
+    }
+
+    document.getElementById('btnPlay').onclick = () => {
+      playing = true;
+      if (stepIdx >= STEPS.length) stepIdx = 0;
+      clearTimeout(timer);
+      tick();
+    };
+    document.getElementById('btnPause').onclick = () => {
+      playing = false;
+      clearTimeout(timer);
+    };
+    document.getElementById('btnStep').onclick = () => {
+      playing = false;
+      clearTimeout(timer);
+      if (stepIdx >= STEPS.length) stepIdx = 0;
+      nextStep(false);
+    };
+
+    initEdges();
+    initPipeline();
+    drawDigit();
+    drawProbBars();
+    drawCharts();
+    applyStep(0);
+  </script>
+</body>
+</html>

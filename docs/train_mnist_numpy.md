@@ -48,6 +48,15 @@ flowchart LR
 python3 tools/train_mnist_numpy.py
 ```
 
+**网页动画演示**：
+
+- 流程总览：[`train_mnist_numpy_demo.html`](train_mnist_numpy_demo.html)
+- **一个 batch 的逐步推理与训练**（矩阵示意图 + 放大的真实数值，16 步，单文件可直接双击打开）：[`train_mnist_step_by_step.html`](train_mnist_step_by_step.html)  
+  重新生成：`python3 tools/build_mnist_step_demo.py`
+- **矩阵逐元素**（`B=100`，含完整 `x/W/b/δ/dW` 与 SGD 前后数值）：[`train_mnist_numpy_matrices.html`](train_mnist_numpy_matrices.html)  
+  **必须用系统浏览器 + HTTP**（Cursor/VS Code 内置预览不会跑 JS，会一直停在「正在初始化」）：`cd docs && python3 -m http.server 8765` → Chrome/Edge 打开 `http://127.0.0.1:8765/train_mnist_numpy_matrices.html`（需同目录存在 `.js` 与 `.json.gz`）  
+  重新导出：`python3 tools/export_mnist_matrix_demo.py && python3 tools/build_mnist_matrix_demo_html.py`
+
 ---
 
 ## 2. MNIST 与 IDX 格式
@@ -346,7 +355,30 @@ classDiagram
 
 ---
 
-## 9. 参考
+## 9. 超参对比可视化
+
+使用 Matplotlib 对比不同 `batch_size` / `learning_rate`（需安装 `matplotlib`）：
+
+```bash
+cd tools
+python3 plot_mnist_training_compare.py          # 默认 10 epoch，较耗时
+python3 plot_mnist_training_compare.py --fast  # 快速试跑
+```
+
+输出目录 `docs/figures/`：
+
+| 文件 | 内容 |
+|------|------|
+| `mnist_batch_size_compare.png` | 固定 `lr=0.1`，比较 batch 64/100/128/256：loss、train/test acc、最终准确率与耗时 |
+| `mnist_lr_compare.png` | 固定 `batch=128`，比较 lr：曲线与最终 test acc |
+| `mnist_training_summary.png` | 实验汇总表 |
+| `mnist_training_results.json` | 数值结果与逐 epoch 历史（便于复现） |
+
+`MLP.train(..., test_x=, test_y=, train_eval_x=)` 会在 `self.history` 中记录 `train_loss`、`test_acc`、子集 `train_acc` 等。
+
+---
+
+## 10. 参考
 
 - [MNIST 官网](http://yann.lecun.com/exdb/mnist/) — IDX 格式说明  
 - PyTorch [`nn.Linear`](https://pytorch.org/docs/stable/generated/torch.nn.Linear.html) — `weight` 为 `(out_features, in_features)`  
