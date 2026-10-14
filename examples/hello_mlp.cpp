@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <cstdlib>
 #include <format>
 #include <inference/mlp.hpp>
@@ -25,17 +26,72 @@ std::string format_indices(const std::vector<inference::int64> &indices)
 }
 } // namespace
 
+void draw(const inference::Tensor &tensor)
+{
+    static const char *kRamp = " .:-=+*#%@";
+    inference::Tensor reshaped = tensor.reshape({28, 28});
+    for (inference::int64 i = 0; i < 28; ++i)
+    {
+        std::string line = "    ";
+        for (inference::int64 j = 0; j < 28; ++j)
+        {
+            int level = static_cast<inference::int64>(reshaped(i, j) * 9.99F);
+            line += kRamp[level < 0 ? 0 : (level > 9 ? 9 : level)];
+            line += kRamp[level < 0 ? 0 : (level > 9 ? 9 : level)];
+        }
+        std::cout << line << std::endl;
+    }
+    std::cout << std::endl;
+}
+
+void draw_prob(const inference::Tensor &tensor)
+{
+    inference::Tensor reshaped = tensor.reshape({10});
+    for (inference::int64 i = 0; i < 10; ++i)
+    {
+        std::string line = " ";
+        const int num = std::clamp(static_cast<int>(reshaped(i) * 30.0F), 0, 30);
+        line += std::format("{}: {}", i, std::string(num, '*'));
+        std::cout << line << std::endl;
+    }
+}
+
 #ifndef INFER_MODEL_DIR
 #define INFER_MODEL_DIR "data/models"
 #endif
 
+#ifndef INFER_EXAMPLES_DIR
+#define INFER_EXAMPLES_DIR "examples"
+#endif
+
+namespace
+{
+
+const char *resolve_dir(const char *env_name, const char *compiled_default)
+{
+    const char *from_env = std::getenv(env_name);
+    return from_env != nullptr ? from_env : compiled_default;
+}
+
+std::string join_path(const std::string &dir, const std::string &filename)
+{
+    if (dir.empty())
+    {
+        return filename;
+    }
+    if (dir.back() == '/')
+    {
+        return dir + filename;
+    }
+    return dir + "/" + filename;
+}
+
+} // namespace
+
 int main(int argc, char *argv[])
 {
-    const char *infer_model_dir = std::getenv("INFER_MODEL_DIR");
-    if (infer_model_dir == nullptr)
-    {
-        infer_model_dir = INFER_MODEL_DIR;
-    }
+    const char *infer_model_dir = resolve_dir("INFER_MODEL_DIR", INFER_MODEL_DIR);
+    const char *infer_examples_dir = resolve_dir("INFER_EXAMPLES_DIR", INFER_EXAMPLES_DIR);
     // load model file
     const std::string model_path = std::string(infer_model_dir) + "/mnist_mlp.inference";
     const inference::ModelFile model_file = inference::ModelFile::load(model_path);
@@ -49,6 +105,30 @@ int main(int argc, char *argv[])
     const inference::Tensor images = sample_file.get_tensor("images");
     const inference::Tensor labels = sample_file.get_tensor("labels");
 
+    const std::string digit3_path = join_path(infer_examples_dir, "3.inference");
+    const std::string digit4_path = join_path(infer_examples_dir, "4.inference");
+    const std::string digit5_path = join_path(infer_examples_dir, "5.inference");
+
+    std::cout << "================================================" << std::endl;
+    inference::ModelFile mf = inference::ModelFile::load(digit3_path);
+    inference::Tensor image = mf.get_tensor("image"); // [1, 784]
+    const inference::int64 digit = model.predict(image);
+    draw(image);
+    std::cout << "Predict digit = " << digit << " (" << digit3_path << ")\n";
+    std::cout << "================================================" << std::endl;
+    std::cout << "================================================" << std::endl;
+    inference::ModelFile mf2 = inference::ModelFile::load(digit4_path);
+    inference::Tensor image2 = mf2.get_tensor("image"); // [1, 784]
+    const inference::int64 digit2 = model.predict(image2);
+    draw(image2);
+    std::cout << "Predict digit = " << digit2 << " (" << digit4_path << ")\n";
+    std::cout << "================================================" << std::endl;
+    inference::ModelFile mf3 = inference::ModelFile::load(digit5_path);
+    inference::Tensor image3 = mf3.get_tensor("image"); // [1, 784]
+    const inference::int64 digit3 = model.predict(image3);
+    draw(image3);
+    std::cout << "Predict digit = " << digit3 << " (" << digit5_path << ")\n";
+    std::cout << "================================================" << std::endl;
     // test model
     const inference::int64 n = images.dim(0);
     std::vector<inference::int64> incorrect_indices;
@@ -58,11 +138,16 @@ int main(int argc, char *argv[])
         const inference::Tensor label = labels.slice(0, i, i + 1);
         const inference::Tensor prob = model.forward(image);
         const inference::int64 pred = model.predict(image);
-        std::cout << std::format("i: {} prediction: {} label: {:.0f}\n", i, pred, label(0));
+        std::cout << "================================================" << std::endl;
+        draw(image);
+        std::cout << "================================================" << std::endl;
+        draw_prob(prob);
+        std::cout << std::format("Prediction: {} label: {:.0f}\n", pred, label(0));
         if (label(0) != static_cast<float>(pred))
         {
             incorrect_indices.push_back(i);
         }
+        std::cout << "================================================" << std::endl;
     }
     if (!incorrect_indices.empty())
     {

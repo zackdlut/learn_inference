@@ -22,10 +22,22 @@ class MLP
     };
     Trace forward_trace(const Tensor &input) const;
 
-    const Tensor& w1() {return w1_;}
-    const Tensor& b1() {return b1_;}
-    const Tensor& w2() {return w2_;}
-    const Tensor& b2() {return b2_;}
+    const Tensor &w1() const
+    {
+        return w1_;
+    }
+    const Tensor &b1() const
+    {
+        return b1_;
+    }
+    const Tensor &w2() const
+    {
+        return w2_;
+    }
+    const Tensor &b2() const
+    {
+        return b2_;
+    }
 
     std::string info() const;
 
