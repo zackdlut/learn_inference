@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>INFR 模型文件格式（.inference）</title>
+<style>
+  :root {
+    --paper: #fbfaf6; --ink: #222; --muted: #6b6b6b; --line: #e4e1d8;
+    --hand: "Comic Sans MS", "Segoe Print", "Kalam", "Xiaolai SC", cursive;
+    --mono: "JetBrains Mono", Consolas, monospace;
+    --hdr: #e3edfc; --hdr-stroke: #2f6fd6;
+    --meta: #fdf0d6; --meta-stroke: #d98a00;
+    --data: #dff4ea; --data-stroke: #239a6a;
+    --field: #f5f0ff; --field-stroke: #7c4ddb;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: #ecebe6; color: var(--ink); font-family: system-ui, "PingFang SC", "Microsoft YaHei", sans-serif; line-height: 1.55; }
+  main { max-width: 1080px; margin: 0 auto; padding: 24px 16px 64px; }
+  h1 { font-family: var(--hand); font-size: 1.65rem; margin: 0 0 8px; }
+  h2 { font-family: var(--hand); font-size: 1.25rem; margin: 32px 0 10px; padding-bottom: 4px; border-bottom: 2px dashed #bbb; }
+  .sub { color: var(--muted); margin: 0 0 20px; max-width: 52em; }
+  .card { background: var(--paper); border: 1px solid var(--line); border-radius: 6px; padding: 16px 18px; margin: 14px 0; box-shadow: 0 1px 3px rgba(0,0,0,.06); }
+  .fig { overflow-x: auto; margin: 10px 0; }
+  .fig svg { display: block; min-width: 720px; }
+  pre { font-family: var(--mono); font-size: 12.5px; background: #f1efe8; border-left: 3px solid #c9c3b3; padding: 8px 12px; margin: 8px 0; overflow-x: auto; }
+  code { font-family: var(--mono); font-size: 12.5px; }
+  table { border-collapse: collapse; font-size: 13px; width: 100%; margin-top: 8px; }
+  th, td { border: 1px solid var(--line); padding: 6px 10px; text-align: left; vertical-align: top; }
+  th { background: #f1efe8; }
+  .note { font-size: 13.5px; color: #333; margin-top: 8px; }
+  .legend { display: flex; flex-wrap: wrap; gap: 16px; font-size: 13px; margin: 8px 0 4px; }
+  .legend span { display: inline-flex; align-items: center; gap: 6px; }
+  .legend i { width: 20px; height: 12px; border: 1.5px solid; border-radius: 2px; }
+  a { color: #2f6fd6; }
+  .pill { display: inline-block; font-family: var(--mono); font-size: 11px; background: #eee; padding: 1px 6px; border-radius: 4px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>INFR 文件格式</h1>
+  <p class="sub">
+    扩展名常用 <code>.inference</code>。由 <a href="../tools/train_mnist_numpy.py"><code>tools/train_mnist_numpy.py</code></a> 的 <code>save()</code> 写出，
+    由 C++ <a href="../include/inference/model_file.hpp"><code>ModelFile::load</code></a> / <a href="../src/model_file.cpp"><code>get_tensor</code></a> 读取。
+    所有多字节整数均为<strong>小端序</strong>（<code>&lt;I</code> / <code>&lt;q</code> / <code>&lt;Q</code>）。
+  </p>
+
+  <div class="legend">
+    <span><i style="background:var(--hdr);border-color:var(--hdr-stroke)"></i> 固定文件头</span>
+    <span><i style="background:var(--meta);border-color:var(--meta-stroke)"></i> 张量元信息（重复 N 次）</span>
+    <span><i style="background:var(--field);border-color:var(--field-stroke)"></i> 锚点字段</span>
+    <span><i style="background:var(--data);border-color:var(--data-stroke)"></i> 数据区（原始 fp32 字节）</span>
+  </div>
+
+  <h2>1. 文件整体布局</h2>
+  <div class="card">
+    <div class="fig">
+      <svg viewBox="0 0 920 200" width="920" height="200" xmlns="http://www.w3.org/2000/svg" font-family="system-ui,sans-serif" font-size="12">
+        <defs>
+          <marker id="arrow" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+            <path d="M0,0 L6,3 L0,6 Z" fill="#555"/>
+          </marker>
+        </defs>
+        <!-- file bar -->
+        <text x="8" y="22" fill="#666">文件字节 0 ─────────────────────────────────────────────────────────────→ EOF</text>
+        <rect x="8" y="36" width="72" height="44" rx="4" fill="var(--hdr)" stroke="var(--hdr-stroke)" stroke-width="1.5"/>
+        <text x="44" y="58" text-anchor="middle" font-weight="600">magic</text>
+        <text x="44" y="72" text-anchor="middle" fill="#555">4 B</text>
+
+        <rect x="84" y="36" width="56" height="44" rx="4" fill="var(--hdr)" stroke="var(--hdr-stroke)" stroke-width="1.5"/>
+        <text x="112" y="58" text-anchor="middle" font-weight="600">ver</text>
+        <text x="112" y="72" text-anchor="middle" fill="#555">u32</text>
+
+        <rect x="144" y="36" width="56" height="44" rx="4" fill="var(--hdr)" stroke="var(--hdr-stroke)" stroke-width="1.5"/>
+        <text x="172" y="58" text-anchor="middle" font-weight="600">N</text>
+        <text x="172" y="72" text-anchor="middle" fill="#555">u32</text>
+
+        <rect x="208" y="32" width="280" height="52" rx="4" fill="var(--meta)" stroke="var(--meta-stroke)" stroke-width="1.5"/>
+        <text x="348" y="52" text-anchor="middle" font-weight="600">张量 0 元信息</text>
+        <text x="348" y="68" text-anchor="middle" fill="#555">name · dtype · shape · offset · nbytes</text>
+
+        <text x="498" y="58" fill="#888">…</text>
+
+        <rect x="528" y="32" width="120" height="52" rx="4" fill="var(--meta)" stroke="var(--meta-stroke)" stroke-width="1.5"/>
+        <text x="588" y="58" text-anchor="middle" font-weight="600">张量 N−1</text>
+
+        <rect x="656" y="36" width="88" height="44" rx="4" fill="var(--field)" stroke="var(--field-stroke)" stroke-width="1.5"/>
+        <text x="700" y="54" text-anchor="middle" font-weight="600">data_start</text>
+        <text x="700" y="70" text-anchor="middle" fill="#555">u64</text>
+
+        <rect x="752" y="32" width="160" height="52" rx="4" fill="var(--data)" stroke="var(--data-stroke)" stroke-width="1.5"/>
+        <text x="832" y="52" text-anchor="middle" font-weight="600">数据区</text>
+        <text x="832" y="68" text-anchor="middle" fill="#555">Σ nbytes</text>
+
+        <!-- brace data_start -->
+        <line x1="700" y1="88" x2="700" y2="108" stroke="#7c4ddb" stroke-width="1.5"/>
+        <line x1="700" y1="108" x2="832" y2="108" stroke="#7c4ddb" stroke-width="1.5" marker-end="url(#arrow)"/>
+        <text x="712" y="124" fill="#7c4ddb">data_start = 本字段结束后的首字节（数据区起点）</text>
+
+        <!-- tensor slice in data -->
+        <rect x="752" y="140" width="90" height="36" rx="3" fill="#fff" stroke="var(--data-stroke)" stroke-width="1"/>
+        <text x="797" y="158" text-anchor="middle" font-size="11">T0 @ offset₀</text>
+        <rect x="848" y="140" width="64" height="36" rx="3" fill="#fff" stroke="var(--data-stroke)" stroke-width="1"/>
+        <text x="880" y="158" text-anchor="middle" font-size="11">T1 …</text>
+        <text x="752" y="192" fill="#555">offset / nbytes 均相对<strong>数据区起点</strong>，不是文件头。</text>
+      </svg>
+    </div>
+    <p class="note">
+      元信息与 payload 分离：加载时先解析头部即可知道有哪些张量、各占多长；需要时再按 <code>offset</code> 拷贝或 mmap 对应片段。
+    </p>
+  </div>
+
+  <h2>2. 字段定义</h2>
+  <div class="card">
+    <table>
+      <thead>
+        <tr><th>顺序</th><th>字段</th><th>类型</th><th>说明</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>1</td><td><code>magic</code></td><td>4 × char</td><td>固定为 <code>INFR</code>（0x49 0x4E 0x46 0x52）</td></tr>
+        <tr><td>2</td><td><code>version</code></td><td>uint32 LE</td><td>当前为 <code>1</code></td></tr>
+        <tr><td>3</td><td><code>num_tensors</code></td><td>uint32 LE</td><td>张量个数 N，必须 &gt; 0</td></tr>
+        <tr><td colspan="4" style="background:#faf8f2"><strong>重复 N 次</strong>（每张量一条元信息记录）</td></tr>
+        <tr><td>4a</td><td><code>name_len</code></td><td>uint32 LE</td><td>UTF-8 名称字节数</td></tr>
+        <tr><td>4b</td><td><code>name</code></td><td>name_len 字节</td><td>如 <code>fc1.weight</code></td></tr>
+        <tr><td>4c</td><td><code>dtype</code></td><td>uint32 LE</td><td><code>0</code> = float32</td></tr>
+        <tr><td>4d</td><td><code>ndim</code></td><td>uint32 LE</td><td>形状维数（标量时可为 0）</td></tr>
+        <tr><td>4e</td><td><code>dims</code></td><td>int64 LE × ndim</td><td>各维长度，与 NumPy <code>shape</code> 一致</td></tr>
+        <tr><td>4f</td><td><code>offset</code></td><td>uint64 LE</td><td>在数据区内的起始字节偏移</td></tr>
+        <tr><td>4g</td><td><code>nbytes</code></td><td>uint64 LE</td><td>原始数据长度，须等于 <code>numel × 4</code></td></tr>
+        <tr><td>5</td><td><code>data_start</code></td><td>uint64 LE</td><td>数据区在<strong>整个文件</strong>中的起始偏移；写入时 <code>len(header_before_field) + 8</code></td></tr>
+        <tr><td>6</td><td><em>payload</em></td><td>连续字节</td><td>各张量按保存顺序紧密拼接；单张量内部为 C 连续、小端 fp32</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h2>3. 单张量元信息（放大）</h2>
+  <div class="card">
+    <div class="fig">
+      <svg viewBox="0 0 640 120" width="640" height="120" xmlns="http://www.w3.org/2000/svg" font-family="var(--mono),monospace" font-size="11">
+        <rect x="10" y="20" width="48" height="36" fill="#fff" stroke="#999"/><text x="34" y="42" text-anchor="middle">len</text>
+        <rect x="62" y="20" width="100" height="36" fill="#fff" stroke="#999"/><text x="112" y="42" text-anchor="middle">name UTF-8</text>
+        <rect x="168" y="20" width="40" height="36" fill="#fff" stroke="#999"/><text x="188" y="42" text-anchor="middle">dt</text>
+        <rect x="214" y="20" width="40" height="36" fill="#fff" stroke="#999"/><text x="234" y="42" text-anchor="middle">nd</text>
+        <rect x="260" y="20" width="120" height="36" fill="#fff" stroke="#999"/><text x="320" y="42" text-anchor="middle">dims[int64×nd]</text>
+        <rect x="386" y="20" width="56" height="36" fill="#fff" stroke="#999"/><text x="414" y="42" text-anchor="middle">off</text>
+        <rect x="448" y="20" width="56" height="36" fill="#fff" stroke="#999"/><text x="476" y="42" text-anchor="middle">len</text>
+        <text x="10" y="78" fill="#555">示例 name=<code>fc1.weight</code> → len=10, ndim=2, dims=(128, 784), nbytes=401408</text>
+        <text x="10" y="98" fill="#555">数据区拷贝：<code>memcpy(dst, data + offset, nbytes)</code></text>
+      </svg>
+    </div>
+  </div>
+
+  <h2>4. 写入与读取流程</h2>
+  <div class="card">
+    <div class="fig">
+      <svg viewBox="0 0 720 260" width="720" height="260" xmlns="http://www.w3.org/2000/svg" font-size="12" font-family="system-ui,sans-serif">
+        <rect x="20" y="20" width="200" height="56" rx="6" fill="#fdf0d6" stroke="#d98a00"/>
+        <text x="120" y="44" text-anchor="middle" font-weight="600">Python save()</text>
+        <text x="120" y="62" text-anchor="middle" fill="#555">tobytes() · 累加 offset</text>
+
+        <rect x="260" y="20" width="200" height="56" rx="6" fill="#e3edfc" stroke="#2f6fd6"/>
+        <text x="360" y="44" text-anchor="middle" font-weight="600">.inference 文件</text>
+        <text x="360" y="62" text-anchor="middle" fill="#555">header + payload</text>
+
+        <rect x="500" y="20" width="200" height="56" rx="6" fill="#dff4ea" stroke="#239a6a"/>
+        <text x="600" y="44" text-anchor="middle" font-weight="600">ModelFile::load</text>
+        <text x="600" y="62" text-anchor="middle" fill="#555">校验 magic / v1</text>
+
+        <path d="M220 48 H260" stroke="#666" stroke-width="1.5" marker-end="url(#arrow)"/>
+        <path d="M460 48 H500" stroke="#666" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+        <rect x="500" y="110" width="200" height="48" rx="6" fill="#dff4ea" stroke="#239a6a"/>
+        <text x="600" y="132" text-anchor="middle" font-weight="600">get_tensor(name)</text>
+        <text x="600" y="148" text-anchor="middle" fill="#555">zeros + memcpy 一段</text>
+        <path d="M600 76 V110" stroke="#666" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+        <text x="20" y="200" font-weight="600">Python 打包顺序（每张量）：</text>
+        <text x="20" y="222" font-family="monospace" font-size="11">cursor=0 → 每 tensor: body+=raw; meta+=(name, shape, cursor, len); cursor+=len</text>
+        <text x="20" y="242" font-family="monospace" font-size="11">data_start = len(header_without_data_start_field) + 8</text>
+      </svg>
+    </div>
+  </div>
+
+  <h2>5. 仓库中的示例文件</h2>
+  <div class="card">
+    <table>
+      <thead><tr><th>路径</th><th>N</th><th>典型张量名</th><th>用途</th></tr></thead>
+      <tbody>
+        <tr>
+          <td><code>data/models/mnist_mlp.inference</code></td>
+          <td>4</td>
+          <td><code>fc1.weight</code>, <code>fc1.bias</code>, <code>fc2.weight</code>, <code>fc2.bias</code></td>
+          <td>C++ <code>MLP::load</code> 推理权重</td>
+        </tr>
+        <tr>
+          <td><code>data/models/mnist_activation.inference</code></td>
+          <td>5</td>
+          <td><code>input</code>, <code>z1</code>, <code>h1</code>, <code>z2</code>, <code>prob</code></td>
+          <td>单层前向中间结果对拍</td>
+        </tr>
+        <tr>
+          <td><code>data/models/mnist_samples.inference</code></td>
+          <td>2</td>
+          <td><code>images</code>, <code>labels</code></td>
+          <td>测试样本（labels 以 fp32 存储类别下标）</td>
+        </tr>
+      </tbody>
+    </table>
+    <p class="note">生成方式：<code>python3 tools/train_mnist_numpy.py</code></p>
+  </div>
+
+  <h2>6. 实现注意</h2>
+  <div class="card">
+    <ul class="note" style="margin:0;padding-left:1.2em">
+      <li>不要用 <code>memcpy</code> 直接读入含 padding 的 C 结构体；按字段逐段解析才跨平台稳定。</li>
+      <li><code>nbytes</code> 必须与 <code>∏ dims × sizeof(float)</code> 一致，否则 C++ 加载失败。</li>
+      <li>张量在文件中的顺序与 Python <code>dict</code> 插入顺序一致（3.7+ 保序）。</li>
+      <li>当前仅支持 <span class="pill">version=1</span> <span class="pill">dtype=0</span>；扩展新 dtype 时需同时 bump version。</li>
+    </ul>
+    <pre>// 数据区切片（C++）
+model_file.data.assign(buf.begin() + data_start, buf.end());
+std::memcpy(ret.data().data(), data.data() + info.offset, info.length);</pre>
+  </div>
+
+  <p class="sub" style="margin-top:28px">
+    相关代码：<code>tools/train_mnist_numpy.py</code> · <code>src/model_file.cpp</code> · 测试 <code>tests/test_model_file.cpp</code>
+  </p>
+</main>
+</body>
+</html>

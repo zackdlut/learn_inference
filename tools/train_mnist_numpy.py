@@ -100,8 +100,8 @@ class MLP:
         z1 = x @ self.W1.T + self.b1
         h1 = self.relu(z1)
         z2 = h1 @ self.W2.T + self.b2
-        p = self.softmax(z2)
-        return z1, h1, z2, p
+        prob = self.softmax(z2)
+        return z1, h1, z2, prob
 
     def backward(self, x_batch, y_batch, z1, h1, p):
         """W is (out, in); forward uses x @ W.T (same as nn.Linear)."""
@@ -145,12 +145,12 @@ class MLP:
             for i in range(0, n, self.batch_size):
                 x_batch = x[i : i + self.batch_size]
                 y_batch = y[i : i + self.batch_size]
-                z1, h1, z2, p = self.forward(x_batch)
+                z1, h1, z2, prob = self.forward(x_batch)
                 batch_size = x_batch.shape[0]
                 loss += -np.log(
-                    p[np.arange(batch_size), y_batch] + 1e-9
+                    prob[np.arange(batch_size), y_batch] + 1e-9
                 ).sum()
-                dW1, db1, dW2, db2 = self.backward(x_batch, y_batch, z1, h1, p)
+                dW1, db1, dW2, db2 = self.backward(x_batch, y_batch, z1, h1, prob)
                 self.W1 -= self.learning_rate * dW1
                 self.b1 -= self.learning_rate * db1
                 self.W2 -= self.learning_rate * dW2
@@ -252,8 +252,8 @@ class MLP:
     def save_activation(self, path, x):
         # save input, z1, h1, z2, prob
         one = x[:1]
-        z1, h1, z2, p = self.forward(one)
-        self.save(path, {"input": one, "z1": z1, "h1": h1, "z2": z2, "prob": p})
+        z1, h1, z2, prob = self.forward(one)
+        self.save(path, {"input": one, "z1": z1, "h1": h1, "z2": z2, "prob": prob})
         print(f"Activation saved to {path}")
 
     def save_samples(self, path, x, y , n = 100):

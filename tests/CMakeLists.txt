@@ -29,6 +29,9 @@ foreach(src IN LISTS TEST_SOURCES)
     add_executable(${test_exe} main.cpp "${src}")
     target_include_directories(${test_exe} PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
     target_link_libraries(${test_exe} PRIVATE inference)
+    target_compile_definitions(${test_exe} PRIVATE
+        INFERENCE_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
+    )
 
     # 整文件一条 ctest：ctest -R '^test_tensor$'
     add_visible_test(${test_exe} ${test_exe})

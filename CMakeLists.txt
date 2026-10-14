@@ -37,6 +37,8 @@ add_library(inference SHARED
     src/tensor.cpp
     src/ops.cpp
     src/kernel.cpp
+    src/model_file.cpp
+    src/mlp.cpp
 )
 # 给inference libary 添加公共头文件目录
 target_include_directories(inference PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
