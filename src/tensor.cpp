@@ -196,8 +196,7 @@ Shape infer_reshape_shape(Shape new_shape, int64 numel)
         if (numel % known != 0)
         {
             fail(std::format("无法从 {} 推断 -1：{} 不能被 {} 整除",
-                             inference::to_string(new_shape), numel,
-                             known));
+                             inference::to_string(new_shape), numel, known));
         }
         new_shape[static_cast<std::size_t>(infer_idx)] = numel / known;
     }

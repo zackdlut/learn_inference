@@ -86,8 +86,8 @@ void softmax_f32(std::span<const float> x, std::span<float> out)
         v *= inv_sum;
 }
 
-void layernom_f32(std::span<const float> x, std::span<const float> w, std::span<const float> b,
-                  std::span<float> out, float eps)
+void layernorm_f32(std::span<const float> x, std::span<const float> w, std::span<const float> b,
+                   std::span<float> out, float eps)
 {
     const auto n = static_cast<float>(x.size());
     float mean = 0.0F;
@@ -162,7 +162,7 @@ void matmul_f32_ikj(std::span<const float> a, std::span<const float> b, std::spa
     // 而且这种模式编译器能自动向量化成 AVX 指令。
     //
     // 代价是不能再用局部变量累加 sum，必须先把 C 清零再累加。
-    std::ranges::fill(c, 0.0F);
+    std::ranges::fill(c.first(static_cast<std::size_t>(M * N)), 0.0F);
     for (int64 i = 0; i < M; ++i)
     {
         for (int64 k = 0; k < K; ++k)
@@ -176,14 +176,20 @@ void matmul_f32_ikj(std::span<const float> a, std::span<const float> b, std::spa
         }
     }
 }
-void matmul_f32(std::span<const float> a, std::span<const float> b, std::span<float> c, int64 M,
+/* void matmul_f32(std::span<const float> a, std::span<const float> b, std::span<float> c, int64 M,
                 int64 N, int64 K)
 {
     matmul_f32_ikj(a, b, c, M, N, K);
-}
+} */
 
-void matmul_nt_f32(std::span<const float> a, std::span<const float> w, std::span<float> c, int64 M,
-                   int64 N, int64 K)
+/* void matmul_nt_f32(std::span<const float> a, std::span<const float> w, std::span<float> c, int64
+M, int64 N, int64 K)
+{
+    matmul_nt_f32_naive(a, w, c, M, N, K);
+} */
+
+void matmul_nt_f32_naive(std::span<const float> a, std::span<const float> w, std::span<float> c,
+                         int64 M, int64 N, int64 K)
 {
     // C[i][j] = Σₖ A[i][k] · W[j][k]   注意 W 的下标是 [j][k] 不是 [k][j]
     //
@@ -203,4 +209,5 @@ void matmul_nt_f32(std::span<const float> a, std::span<const float> w, std::span
         }
     }
 }
+
 } // namespace inference::kernel

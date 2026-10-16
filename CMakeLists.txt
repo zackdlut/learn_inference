@@ -40,6 +40,7 @@ add_library(inference SHARED
     src/builtin_ops.cpp
     src/graph.cpp
     src/kernel.cpp
+    src/kernel_matmul.cpp
     src/model_file.cpp
     src/mlp.cpp
 )

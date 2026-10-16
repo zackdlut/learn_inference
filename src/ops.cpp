@@ -138,7 +138,7 @@ Tensor layernorm(const Tensor &x, const Tensor &w, const Tensor &b, float eps)
     {
         const auto off = static_cast<std::size_t>(r * cols);
         const auto n = static_cast<std::size_t>(cols);
-        kernel::layernom_f32(src.subspan(off, n), cw.data(), cb.data(), dst.subspan(off, n), eps);
+        kernel::layernorm_f32(src.subspan(off, n), cw.data(), cb.data(), dst.subspan(off, n), eps);
     }
     return out;
 }

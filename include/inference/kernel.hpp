@@ -21,8 +21,8 @@ void gelu_exact_f32(std::span<const float> x,
 // softmax：把一行数字变成和为 1 的概率分布
 void softmax_f32(std::span<const float> x, std::span<float> out);
 // layernorm：对一行做标准化后再缩放平移。w/b 长度必须等于 x
-void layernom_f32(std::span<const float> x, std::span<const float> w, std::span<const float> b,
-                  std::span<float> out, float eps);
+void layernorm_f32(std::span<const float> x, std::span<const float> w, std::span<const float> b,
+                   std::span<float> out, float eps);
 // rmsnorm：LLaMA 系模型用的简化版归一化，阶段 6 会用到
 void rmsnorm_f32(std::span<const float> x, std::span<const float> w, std::span<float> out,
                  float eps);
@@ -43,5 +43,32 @@ void matmul_f32(std::span<const float> a, std::span<const float> b, std::span<fl
 // 而这个布局对 cache 反而更友好：A 和 W 都是按行连续读取的。
 void matmul_nt_f32(std::span<const float> a, std::span<const float> w, std::span<float> c, int64 M,
                    int64 N, int64 K);
+
+void matmul_nt_f32_naive(std::span<const float> a, std::span<const float> w, std::span<float> c,
+                         int64 M, int64 N, int64 K);
+void matmul_nt_f32_tiled(std::span<const float> a, std::span<const float> w, std::span<float> c,
+                         int64 M, int64 N, int64 K);
+void matmul_nt_f32_avx2(std::span<const float> a, std::span<const float> w, std::span<float> c,
+                        int64 M, int64 N, int64 K);
+void matmul_nt_f32_parallel(std::span<const float> a, std::span<const float> w, std::span<float> c,
+                            int64 M, int64 N, int64 K);
+
+// v3: 循环分块。让参与运算的数据块小到能待在 L1 cache 里
+void matmul_f32_tiled(std::span<const float> a, std::span<const float> b, std::span<float> c,
+                      int64 M, int64 N, int64 K);
+
+// v4: AVX2 + FMA 微内核。一条指令算 8 个 float，累加器常驻寄存器
+void matmul_f32_avx2(std::span<const float> a, std::span<const float> b, std::span<float> c,
+                     int64 M, int64 N, int64 K);
+
+// v5: 多线程。按行切给不同核
+void matmul_f32_parallel(std::span<const float> a, std::span<const float> b, std::span<float> c,
+                         int64 M, int64 N, int64 K);
+
+// 运行期查询本次构建是否带 AVX2（-march=native 关掉时会回退到标量版）
+bool has_avx2_support() noexcept;
+// 多线程用几个线程。默认取硬件并发数，设成 1 就等于串行。
+void set_num_threads(int n) noexcept;
+int get_num_threads() noexcept;
 
 } // namespace inference::kernel

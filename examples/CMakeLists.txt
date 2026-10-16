@@ -11,6 +11,7 @@ add_example(hello_tensor)
 add_example(hello_ops)
 add_example(hello_mlp)
 add_example(hello_graph)
+add_example(hello_perf)
 
 target_compile_definitions(hello_mlp PRIVATE
   INFER_EXAMPLES_DIR="${CMAKE_SOURCE_DIR}/examples"
