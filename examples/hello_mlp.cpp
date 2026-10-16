@@ -1,3 +1,4 @@
+#include "inference/model_file.hpp"
 #include <algorithm>
 #include <cstdlib>
 #include <format>

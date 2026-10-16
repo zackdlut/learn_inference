@@ -1,4 +1,5 @@
 #include "inference/mlp.hpp"
+#include "inference/model_file.hpp"
 #include "inference/ops.hpp"
 #include "inference/tensor.hpp"
 #include <cmath>
@@ -72,7 +73,7 @@ std::string MLP::info() const
     const int64 out = w2_.dim(0);
     // 特征维：input[in] → Linear → ReLU → Linear → softmax → argmax（每样本 1 个类别下标）
     return std::format(
-        "input({}) → linear({}, {}) → ReLU({}) → linear({}, {}) → softmax({}) → argmax(1)",
-        in, in, hidden, hidden, hidden, out, out);
+        "input({}) → linear({}, {}) → ReLU({}) → linear({}, {}) → softmax({}) → argmax(1)", in, in,
+        hidden, hidden, hidden, out, out);
 }
 } // namespace inference

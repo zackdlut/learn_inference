@@ -36,6 +36,9 @@ endif()
 add_library(inference SHARED
     src/tensor.cpp
     src/ops.cpp
+    src/op.cpp
+    src/builtin_ops.cpp
+    src/graph.cpp
     src/kernel.cpp
     src/model_file.cpp
     src/mlp.cpp

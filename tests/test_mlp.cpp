@@ -1,4 +1,5 @@
 #include "inference/mlp.hpp"
+#include "inference/model_file.hpp"
 #include "inference/ops.hpp"
 #include "infr_test_utils.hpp"
 #include "minitest.hpp"
@@ -99,14 +100,14 @@ TEST(mlp_load_errors)
 {
     CHECK_THROWS(MLP::load(infr_test::model_dir() + "/no_such_mlp.inference"));
 
-    const auto bad_ver =
-        infr_test::write_temp_file(infr_test::pack_infr(2, tiny_mlp_specs()), "mlp_bad_ver.inference");
+    const auto bad_ver = infr_test::write_temp_file(infr_test::pack_infr(2, tiny_mlp_specs()),
+                                                    "mlp_bad_ver.inference");
     CHECK_THROWS(MLP::load(bad_ver));
 
     std::vector<infr_test::TensorSpec> missing_fc2 = tiny_mlp_specs();
     missing_fc2.pop_back();
-    const auto missing_path =
-        infr_test::write_temp_file(infr_test::pack_infr(1, missing_fc2), "mlp_missing_fc2.inference");
+    const auto missing_path = infr_test::write_temp_file(infr_test::pack_infr(1, missing_fc2),
+                                                         "mlp_missing_fc2.inference");
     CHECK_THROWS(MLP::load(missing_path));
 
     std::vector<infr_test::TensorSpec> bad_w1 = tiny_mlp_specs();

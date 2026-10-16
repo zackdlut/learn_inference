@@ -1,5 +1,5 @@
 #pragma once
-#include "inference/model_file.hpp"
+
 #include "inference/tensor.hpp"
 #include <string>
 
@@ -11,7 +11,6 @@ class MLP
     static MLP load(const std::string &path);
     Tensor forward(const Tensor &input) const;
     int64 predict(const Tensor &input) const;
-    
 
     struct Trace
     {
@@ -40,7 +39,6 @@ class MLP
     }
 
     std::string info() const;
-
 
   private:
     Tensor w1_;
