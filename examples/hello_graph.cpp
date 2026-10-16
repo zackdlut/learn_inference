@@ -63,7 +63,7 @@ int main(int argc, char *argv[])
     const ValueId p = g.add_node("softmax", "prob", {h2});
     g.mark_output(p);
     g.finalize(); // 拓扑排序 + 形状推断 + 使用计数
-    std::cout << g.info();
+    std::cout << g.to_string();
     println("");
     println("注意所有中间结果的形状都填好了 —— finalize() 做了形状推断，");
     println("一次实际计算都没跑，就知道每步输出多大。这是内存规划的前提。");

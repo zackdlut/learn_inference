@@ -13,7 +13,7 @@
 |------|------|
 | `int64` | `std::int64_t` |
 | `Shape` | `std::vector<int64>`，如 `{2, 3}` 表示 2×3；**标量**用空 shape `{}` |
-| `shape_string(shape)` | 形状转可读字符串 |
+| `to_string(shape)` | 形状转可读字符串 |
 | `contiguous_strides(shape)` | 行主序连续步长 |
 | `numel_of(shape)` | 元素个数 ∏dims |
 

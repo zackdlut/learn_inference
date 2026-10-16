@@ -38,7 +38,7 @@ class MLP
         return b2_;
     }
 
-    std::string info() const;
+    std::string to_string() const;
 
   private:
     Tensor w1_;

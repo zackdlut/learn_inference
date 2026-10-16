@@ -136,7 +136,7 @@ Tensor ModelFile::get_tensor(const std::string &name) const
     return ret;
 }
 
-std::string ModelFile::info() const noexcept
+std::string ModelFile::to_string() const noexcept
 {
     std::string file_info;
     file_info += "INFR version: " + std::to_string(version_) + "\n";

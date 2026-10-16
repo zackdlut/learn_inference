@@ -69,7 +69,7 @@ TEST(graph_consumer_count_after_finalize)
 TEST(graph_info_lists_io_and_compute)
 {
     const Graph g = tiny_add_graph();
-    const std::string s = g.info();
+    const std::string s = g.to_string();
 
     CHECK(s.find("Graph(") != std::string::npos);
     CHECK(s.find("输入:") != std::string::npos);

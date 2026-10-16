@@ -66,7 +66,7 @@ TEST(model_file_info)
     const std::vector<TensorSpec> specs = {{"x", {1}, {0}}};
     const auto path = write_temp_file(pack_infr(1, specs), "info.inference");
     ModelFile mf = ModelFile::load(path);
-    const std::string s = mf.info();
+    const std::string s = mf.to_string();
     CHECK(s.find("INFR version: 1") != std::string::npos);
     CHECK(s.find("Number of tensors: 1") != std::string::npos);
 }

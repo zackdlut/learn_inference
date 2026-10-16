@@ -12,7 +12,7 @@ namespace inference
 // Shape 相关的函数
 //=============================================================================
 
-std::string shape_string(const Shape &shape)
+std::string to_string(const Shape &shape)
 {
     std::string ret = "(";
     for (std::size_t i = 0; i < shape.size(); ++i)
@@ -190,11 +190,13 @@ Shape infer_reshape_shape(Shape new_shape, int64 numel)
     {
         if (known == 0)
         {
-            fail(std::format("无法从 {} 推断 -1（已知维度乘积为 0）", shape_string(new_shape)));
+            fail(std::format("无法从 {} 推断 -1（已知维度乘积为 0）",
+                             inference::to_string(new_shape)));
         }
         if (numel % known != 0)
         {
-            fail(std::format("无法从 {} 推断 -1：{} 不能被 {} 整除", shape_string(new_shape), numel,
+            fail(std::format("无法从 {} 推断 -1：{} 不能被 {} 整除",
+                             inference::to_string(new_shape), numel,
                              known));
         }
         new_shape[static_cast<std::size_t>(infer_idx)] = numel / known;
@@ -211,8 +213,9 @@ Tensor Tensor::reshape(Shape new_shape) const
     new_shape = infer_reshape_shape(std::move(new_shape), numel_);
     if (numel_of(new_shape) != numel_)
     {
-        fail(std::format("reshape {} -> {} 元素个数不一致（{} vs {}）", shape_string(shape_),
-                         shape_string(new_shape), numel_, numel_of(new_shape)));
+        fail(std::format("reshape {} -> {} 元素个数不一致（{} vs {}）",
+                         inference::to_string(shape_), inference::to_string(new_shape), numel_,
+                         numel_of(new_shape)));
     }
 
     Tensor t = *this;
@@ -239,7 +242,7 @@ Tensor Tensor::permute(Shape new_order) const
         const auto u = static_cast<std::size_t>(axis);
         if (seen[u] != 0)
         {
-            fail(std::format("permute 轴不能重复，收到 {}", shape_string(new_order)));
+            fail(std::format("permute 轴不能重复，收到 {}", inference::to_string(new_order)));
         }
         seen[u] = 1;
     }
@@ -316,8 +319,8 @@ Tensor Tensor::contiguous() const
 std::string Tensor::meta_string() const
 {
     return std::format("Tensor(shape={}, strides={}, offset={}, numel={}, dtype={}, contiguous={})",
-                       shape_string(shape_), shape_string(strides_), offset_, numel_,
-                       dtype_name(dtype_), is_contiguous());
+                       inference::to_string(shape_), inference::to_string(strides_), offset_,
+                       numel_, dtype_name(dtype_), is_contiguous());
 }
 
 std::string Tensor::to_string() const

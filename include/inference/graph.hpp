@@ -74,7 +74,7 @@ class Graph
 
     int consumer_count(ValueId id) const noexcept;
 
-    std::string info() const;
+    std::string to_string() const;
 
   private:
     std::vector<Value> values_;

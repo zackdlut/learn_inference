@@ -26,7 +26,7 @@ class Attributes
     {
         return kv_map.contains(key) ? get<T>(key) : default_value;
     }
-    std::string info() const;
+    std::string to_string() const;
 
   private:
     std::unordered_map<std::string, Attribute> kv_map;
@@ -57,7 +57,7 @@ class OpRegistry
     bool has(const std::string &type) const;
     const Op &get(const std::string &type) const;
     std::vector<std::string> list() const;
-    std::string info() const;
+    std::string to_string() const;
 
   private:
     std::unordered_map<std::string, std::unique_ptr<Op>> ops_map;

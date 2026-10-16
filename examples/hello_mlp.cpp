@@ -96,10 +96,10 @@ int main(int argc, char *argv[])
     // load model file
     const std::string model_path = std::string(infer_model_dir) + "/mnist_mlp.inference";
     const inference::ModelFile model_file = inference::ModelFile::load(model_path);
-    std::cout << "Model file info: " << model_file.info() << std::endl;
+    std::cout << "Model file info: " << model_file.to_string() << std::endl;
     // create model from model file
     const inference::MLP model = inference::MLP::load(model_path);
-    std::cout << "Model info: " << model.info() << std::endl;
+    std::cout << "Model info: " << model.to_string() << std::endl;
     // load sample file
     const std::string sample_path = std::string(infer_model_dir) + "/mnist_samples.inference";
     const inference::ModelFile sample_file = inference::ModelFile::load(sample_path);

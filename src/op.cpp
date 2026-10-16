@@ -48,7 +48,7 @@ std::string attribute_to_string(const Attribute &value)
 }
 
 } // namespace
-std::string Attributes::info() const
+std::string Attributes::to_string() const
 {
     std::string info;
     for (const auto &[key, value] : kv_map)
@@ -105,7 +105,7 @@ std::vector<std::string> OpRegistry::list() const
     return types;
 }
 
-std::string OpRegistry::info() const
+std::string OpRegistry::to_string() const
 {
     std::string info;
     for (const auto &[type, op] : ops_map)

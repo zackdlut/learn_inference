@@ -222,7 +222,7 @@ int Graph::consumer_count(ValueId id) const noexcept
     return 0;
 }
 
-std::string Graph::info() const
+std::string Graph::to_string() const
 {
     auto value_tag = [](ValueId id)
     {
@@ -232,7 +232,7 @@ std::string Graph::info() const
     auto append_named_value = [&](std::string &out, const Value &value)
     {
         out += std::format("    {:<5}{:<16}{}\n", value_tag(value.id), value.name,
-                           shape_string(value.shape));
+                           inference::to_string(value.shape));
     };
 
     std::string s =
@@ -287,7 +287,7 @@ std::string Graph::info() const
         const std::string args = format_args(*node);
         const std::string pad(args.size() < max_args_width ? max_args_width - args.size() : 0, ' ');
         s += std::format("    {:<5}= {:<10}{}{}  {}\n", value_tag(node->output), node->type, args,
-                         pad, shape_string(values_[node->output].shape));
+                         pad, inference::to_string(values_[node->output].shape));
     }
 
     s += "  输出: ";
@@ -336,8 +336,8 @@ std::vector<Tensor> Executor::run(const std::unordered_map<std::string, Tensor> 
             if (v.shape != it->second.shape())
             {
                 throw std::runtime_error("Input " + v.name + " has shape " +
-                                         shape_string(it->second.shape()) + " but expected " +
-                                         shape_string(v.shape));
+                                         to_string(it->second.shape()) + " but expected " +
+                                         to_string(v.shape));
             }
             live.emplace(v.id, it->second);
         }
@@ -384,8 +384,8 @@ std::vector<Tensor> Executor::run(const std::unordered_map<std::string, Tensor> 
         if (output.shape() != g.value(node.output).shape)
         {
             throw std::runtime_error("Output shape mismatch: " + std::to_string(node.output) +
-                                     " has shape " + shape_string(output.shape()) +
-                                     " but expected " + shape_string(g.value(node.output).shape));
+                                     " has shape " + to_string(output.shape()) +
+                                     " but expected " + to_string(g.value(node.output).shape));
         }
 
         const auto nbytes = output.numel() * sizeof(float);

@@ -16,7 +16,7 @@ namespace inference
 using int64 = std::int64_t;
 // 定义形状：shape = {2, 3} 表示 2 行 3 列。标量的 shape 是空的 {} 阶段1临时使用，后续定义Shape类
 using Shape = std::vector<int64>;
-std::string shape_string(const Shape &shape);
+std::string to_string(const Shape &shape);
 Shape contiguous_strides(const Shape &shape);
 int64 numel_of(const Shape &shape);
 

@@ -54,7 +54,7 @@
 | 方法 | 说明 |
 |------|------|
 | `w1()`, `b1()`, `w2()`, `b2()` | 非 const 引用返回内部 `Tensor`（当前 API 未提供 const 重载） |
-| `info()` | 单行计算图字符串，如 `input(784) → linear(784, 128) → … → argmax(1)` |
+| `to_string()` | 单行计算图字符串，如 `input(784) → linear(784, 128) → … → argmax(1)` |
 
 ---
 
@@ -84,7 +84,7 @@ inference::Tensor x = /* [1, 784] 或从 ModelFile 取 images 的一行 */;
 inference::Tensor prob = model.forward(x);
 inference::int64 label = model.predict(x);
 
-std::cout << model.info() << '\n';
+std::cout << model.to_string() << '\n';
 ```
 
 完整流程见 [`examples/hello_mlp.cpp`](../../examples/hello_mlp.cpp)。

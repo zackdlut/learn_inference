@@ -40,7 +40,7 @@ TEST(mlp_load_info_and_weights)
     CHECK(model.w2().shape() == Shape({2, 2}));
     CHECK(model.b2().shape() == Shape({2}));
 
-    const std::string s = model.info();
+    const std::string s = model.to_string();
     CHECK(s.find("input(2)") != std::string::npos);
     CHECK(s.find("linear(2, 2)") != std::string::npos);
     CHECK(s.find("softmax(2)") != std::string::npos);

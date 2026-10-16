@@ -22,7 +22,7 @@ class ModelFile
     {
         return version_;
     }
-    std::string info() const noexcept;
+    std::string to_string() const noexcept;
     bool contains(const std::string &name) const noexcept
     {
         return name_map.contains(name);

@@ -62,7 +62,7 @@ int64 MLP::predict(const Tensor &input) const
     return ops::argmax(prob);
 }
 
-std::string MLP::info() const
+std::string MLP::to_string() const
 {
     if (w1_.numel() == 0 || w2_.numel() == 0)
     {
