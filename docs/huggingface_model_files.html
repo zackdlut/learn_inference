@@ -1,0 +1,383 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Hugging Face 模型文件（GPT-2 示例）</title>
+<style>
+  :root {
+    --paper: #fbfaf6; --ink: #222; --muted: #6b6b6b; --line: #e4e1d8;
+    --hand: "Comic Sans MS", "Segoe Print", "Kalam", "Xiaolai SC", cursive;
+    --mono: "JetBrains Mono", Consolas, monospace;
+    --cfg: #e3edfc; --cfg-stroke: #2f6fd6;
+    --tok: #fdf0d6; --tok-stroke: #d98a00;
+    --wt: #dff4ea; --wt-stroke: #239a6a;
+    --flow: #f5f0ff; --flow-stroke: #7c4ddb;
+    --field: #fce8e8; --field-stroke: #c44;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: #ecebe6; color: var(--ink); font-family: system-ui, "PingFang SC", "Microsoft YaHei", sans-serif; line-height: 1.55; }
+  main { max-width: 1080px; margin: 0 auto; padding: 24px 16px 64px; }
+  h1 { font-family: var(--hand); font-size: 1.65rem; margin: 0 0 8px; }
+  h2 { font-family: var(--hand); font-size: 1.25rem; margin: 32px 0 10px; padding-bottom: 4px; border-bottom: 2px dashed #bbb; }
+  .sub { color: var(--muted); margin: 0 0 20px; max-width: 54em; }
+  .card { background: var(--paper); border: 1px solid var(--line); border-radius: 6px; padding: 16px 18px; margin: 14px 0; box-shadow: 0 1px 3px rgba(0,0,0,.06); }
+  .fig { overflow-x: auto; margin: 10px 0; }
+  .fig svg { display: block; min-width: 720px; }
+  pre { font-family: var(--mono); font-size: 12px; background: #f1efe8; border-left: 3px solid #c9c3b3; padding: 8px 12px; margin: 8px 0; overflow-x: auto; }
+  code { font-family: var(--mono); font-size: 12.5px; }
+  table { border-collapse: collapse; font-size: 13px; width: 100%; margin-top: 8px; }
+  th, td { border: 1px solid var(--line); padding: 6px 10px; text-align: left; vertical-align: top; }
+  th { background: #f1efe8; }
+  .note { font-size: 13.5px; color: #333; margin-top: 8px; }
+  .legend { display: flex; flex-wrap: wrap; gap: 16px; font-size: 13px; margin: 8px 0 4px; }
+  .legend span { display: inline-flex; align-items: center; gap: 6px; }
+  .legend i { width: 20px; height: 12px; border: 1.5px solid; border-radius: 2px; }
+  a { color: #2f6fd6; }
+  .pill { display: inline-block; font-family: var(--mono); font-size: 11px; background: #eee; padding: 1px 6px; border-radius: 4px; }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  @media (max-width: 800px) { .grid2 { grid-template-columns: 1fr; } }
+  .theory { margin-top: 12px; padding: 8px 14px; background: #f7f4fd; border-left: 3px solid #7c4ddb; border-radius: 4px; font-size: 13.5px; line-height: 1.75; }
+  .grid2 > .theory { grid-column: 1 / -1; }
+  .theory .tag { font-family: var(--hand); font-weight: 600; color: #7c4ddb; }
+  .theory p { margin: 4px 0; }
+  .theory .katex-display { margin: 6px 0; overflow-x: auto; overflow-y: hidden; padding: 2px 0; }
+</style>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" />
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
+</head>
+<body>
+<main>
+  <h1>Hugging Face 模型文件导览</h1>
+  <p class="sub">
+    以本仓库 <a href="../data/gpt2/"><code>data/gpt2/</code></a> 为例（从 Hub 拉取的 GPT-2 small）。
+    配套 Markdown：<a href="huggingface_model_files.md"><code>huggingface_model_files.md</code></a>；
+    逐步运算与张量形状：<a href="gpt2_inference_flow.html"><code>gpt2_inference_flow.html</code></a>。
+    图形说明各文件的<strong>格式</strong>、<strong>作用</strong>与<strong>协作关系</strong>。
+  </p>
+
+  <div class="legend">
+    <span><i style="background:var(--cfg);border-color:var(--cfg-stroke)"></i> 配置 config</span>
+    <span><i style="background:var(--tok);border-color:var(--tok-stroke)"></i> 分词器 tokenizer</span>
+    <span><i style="background:var(--wt);border-color:var(--wt-stroke)"></i> 权重 weights</span>
+    <span><i style="background:var(--flow);border-color:var(--flow-stroke)"></i> 数据流 / 逻辑关系</span>
+  </div>
+
+  <h2>1. 目录里有什么？谁连谁？</h2>
+  <div class="card">
+    <div class="fig">
+      <svg viewBox="0 0 900 320" width="900" height="320" xmlns="http://www.w3.org/2000/svg" font-family="system-ui,sans-serif" font-size="12">
+        <defs>
+          <marker id="arrow" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+            <path d="M0,0 L6,3 L0,6 Z" fill="#555"/>
+          </marker>
+        </defs>
+        <!-- Hub folder -->
+        <rect x="24" y="24" width="200" height="200" rx="8" fill="#fff" stroke="#aaa" stroke-dasharray="4 3"/>
+        <text x="124" y="48" text-anchor="middle" font-weight="600">data/gpt2/</text>
+        <rect x="44" y="64" width="160" height="32" rx="4" fill="var(--cfg)" stroke="var(--cfg-stroke)"/>
+        <text x="124" y="84" text-anchor="middle">config.json</text>
+        <rect x="44" y="104" width="160" height="32" rx="4" fill="var(--tok)" stroke="var(--tok-stroke)"/>
+        <text x="124" y="124" text-anchor="middle">vocab.json</text>
+        <rect x="44" y="144" width="160" height="32" rx="4" fill="var(--tok)" stroke="var(--tok-stroke)"/>
+        <text x="124" y="164" text-anchor="middle">merges.txt</text>
+        <rect x="44" y="184" width="160" height="40" rx="4" fill="var(--wt)" stroke="var(--wt-stroke)"/>
+        <text x="124" y="202" text-anchor="middle">model.safetensors</text>
+        <text x="124" y="216" text-anchor="middle" fill="#555" font-size="10">≈548 MB · 160 tensors</text>
+
+        <!-- Loader -->
+        <rect x="320" y="100" width="160" height="56" rx="8" fill="var(--flow)" stroke="var(--flow-stroke)"/>
+        <text x="400" y="124" text-anchor="middle" font-weight="600">加载器</text>
+        <text x="400" y="142" text-anchor="middle" fill="#555">transformers / 自研</text>
+
+        <!-- Tokenizer -->
+        <rect x="560" y="40" width="180" height="72" rx="8" fill="var(--tok)" stroke="var(--tok-stroke)"/>
+        <text x="650" y="68" text-anchor="middle" font-weight="600">Tokenizer</text>
+        <text x="650" y="88" text-anchor="middle" fill="#555">文本 ↔ token id</text>
+
+        <!-- Model -->
+        <rect x="560" y="160" width="180" height="88" rx="8" fill="var(--wt)" stroke="var(--wt-stroke)"/>
+        <text x="650" y="188" text-anchor="middle" font-weight="600">GPT2LMHeadModel</text>
+        <text x="650" y="208" text-anchor="middle" fill="#555">ids → hidden → logits</text>
+        <text x="650" y="228" text-anchor="middle" fill="#555" font-size="10">结构由 config 决定</text>
+
+        <!-- Arrows from files -->
+        <path d="M204 80 H320" stroke="#2f6fd6" stroke-width="1.5" marker-end="url(#arrow)"/>
+        <path d="M204 120 H280 V128 H320" stroke="#d98a00" stroke-width="1.5" fill="none" marker-end="url(#arrow)"/>
+        <path d="M204 160 H260 V128 H320" stroke="#d98a00" stroke-width="1.5" fill="none"/>
+        <path d="M204 204 H320" stroke="#239a6a" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+        <path d="M480 120 H560" stroke="#d98a00" stroke-width="1.5" marker-end="url(#arrow)"/>
+        <path d="M480 132 H520 V204 H560" stroke="#239a6a" stroke-width="1.5" fill="none" marker-end="url(#arrow)"/>
+
+        <path d="M650 112 V160" stroke="#7c4ddb" stroke-width="1.5" marker-end="url(#arrow)"/>
+        <text x="662" y="142" fill="#7c4ddb" font-size="11">input_ids</text>
+
+        <!-- Inference strip -->
+        <rect x="24" y="248" width="852" height="56" rx="6" fill="#f8f8f4" stroke="#ccc"/>
+        <text x="40" y="272" font-weight="600">推理链路：</text>
+        <text x="130" y="272">字符串</text>
+        <text x="200" y="272">→ BPE(vocab+merges)</text>
+        <text x="380" y="272">→ 整数序列</text>
+        <text x="480" y="272">→ Embedding(safetensors)</text>
+        <text x="680" y="272">→ logits</text>
+        <text x="40" y="292" fill="#555" font-size="11">config 不参与逐 token 计算，但决定张量形状、层数、激活函数与最大长度 1024。</text>
+      </svg>
+    </div>
+    <div class="theory">
+      <span class="tag">原理与公式</span>
+      <p>从数学上看，一个"模型"可以拆成三部分：分词函数 \(\mathrm{tok}\)、由 config 决定结构的函数 \(f_{\text{config}}\)、以及从 safetensors 读出的参数集合 \(\theta\)：</p>
+      \[ z = f_{\text{config}}\big(\mathrm{tok}(\text{text});\ \theta\big),\qquad \theta = \{\texttt{wte.weight},\ \texttt{h.0.ln\_1.weight},\ \dots\},\quad |\theta| = 160 \]
+      \[ p_\theta(x_{t+1}=v \mid x_{\le t}) = \mathrm{softmax}(z_t)_v \]
+      <p>同一个 \(f\)（GPT-2 架构代码）配上不同的 config 与 \(\theta\)，就得到 gpt2 / gpt2-medium / gpt2-large / gpt2-xl 等不同模型。反过来，\(\theta\) 必须配合训练时用的那个分词器：同一个 id 在不同词表里代表不同的词，换了分词器，嵌入矩阵的每一行就对不上了。</p>
+    </div>
+  </div>
+
+  <h2>2. config.json — 架构蓝图（不含权重）</h2>
+  <div class="card grid2">
+    <div>
+      <pre>{
+  "model_type": "gpt2",
+  "architectures": ["GPT2LMHeadModel"],
+  "n_layer": 12,
+  "n_head": 12,
+  "n_embd": 768,
+  "n_ctx": 1024,
+  "vocab_size": 50257,
+  "activation_function": "gelu_new",
+  "eos_token_id": 50256
+}</pre>
+    </div>
+    <div>
+      <table>
+        <thead><tr><th>字段</th><th>在本示例中</th></tr></thead>
+        <tbody>
+          <tr><td><code>n_layer</code></td><td>12 个解码器块 → safetensors 里 <code>h.0</code>…<code>h.11</code></td></tr>
+          <tr><td><code>n_embd</code></td><td>隐藏维 768；与多数 weight 的最后一维一致</td></tr>
+          <tr><td><code>n_head</code></td><td>12 头 × 64 维/头；<code>c_attn</code> 输出 2304 = 3×768</td></tr>
+          <tr><td><code>vocab_size</code></td><td>与 <code>wte.weight</code> 行数 50257 一致</td></tr>
+          <tr><td><code>model_type</code></td><td><code>AutoConfig.from_pretrained</code> 选 GPT-2 配置类</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="theory">
+      <span class="tag">原理与公式</span>
+      <p>config 里的几个整数决定了所有张量的形状和总参数量。派生量：</p>
+      \[ d_h = \frac{n_{embd}}{n_{head}} = 64,\qquad d_{ff} = 4\,n_{embd} = 3072,\qquad \dim(\text{qkv}) = 3\,n_{embd} = 2304 \]
+      <p>参数量公式（记 \(d = n_{embd},\ L = n_{layer}\)）：</p>
+      \[ P = \underbrace{(V + n_{pos})\,d}_{\text{wte + wpe}} + L\,\underbrace{(12d^2 + 13d)}_{\text{per block}} + \underbrace{2d}_{\text{ln\_f}} = 124{,}439{,}808 \]
+      <p>fp32 存储为 \(4P \approx 498\ \text{MB}\)。实际 <code>model.safetensors</code> 的数据区是 548,090,880 字节，多出的 50,331,648 字节恰好是 12 个 <code>attn.bias</code> 因果掩码缓冲：\(12\times1024\times1024\times4\)。它们不是可训练参数，只是旧版本把掩码也一起存了进来。</p>
+      <p>把 gpt2-xl 的 config（\(L=48,\ d=1600\)）代入同一个公式，得到约 1.56B 参数。这就是为什么只换 config 就能描述整个模型家族。</p>
+    </div>
+  </div>
+
+  <h2>3. 分词器：vocab.json + merges.txt</h2>
+  <div class="card">
+    <div class="fig">
+      <svg viewBox="0 0 880 200" width="880" height="200" xmlns="http://www.w3.org/2000/svg" font-size="12" font-family="system-ui,sans-serif">
+        <rect x="20" y="30" width="120" height="44" rx="6" fill="#fff" stroke="#999"/>
+        <text x="80" y="58" text-anchor="middle">"Hello world"</text>
+
+        <text x="155" y="58">UTF-8 字节</text>
+        <path d="M140 52 H150" stroke="#666" marker-end="url(#arrow)"/>
+
+        <rect x="230" y="24" width="140" height="56" rx="6" fill="var(--tok)" stroke="var(--tok-stroke)"/>
+        <text x="300" y="48" text-anchor="middle" font-weight="600">merges.txt</text>
+        <text x="300" y="66" text-anchor="middle" fill="#555" font-size="10">50000 条合并规则 · 有序</text>
+
+        <rect x="400" y="24" width="140" height="56" rx="6" fill="var(--tok)" stroke="var(--tok-stroke)"/>
+        <text x="470" y="48" text-anchor="middle" font-weight="600">vocab.json</text>
+        <text x="470" y="66" text-anchor="middle" fill="#555" font-size="10">子词 → id · 50257 项</text>
+
+        <path d="M370 52 H400" stroke="#d98a00" marker-end="url(#arrow)"/>
+        <text x="385" y="44" font-size="10" fill="#d98a00">BPE</text>
+
+        <rect x="570" y="30" width="100" height="44" rx="6" fill="var(--flow)" stroke="var(--flow-stroke)"/>
+        <text x="620" y="58" text-anchor="middle">[15496, 995]</text>
+
+        <path d="M540 52 H570" stroke="#666" marker-end="url(#arrow)"/>
+
+        <rect x="700" y="30" width="160" height="44" rx="6" fill="var(--wt)" stroke="var(--wt-stroke)"/>
+        <text x="780" y="58" text-anchor="middle">wte 查表嵌入</text>
+        <path d="M670 52 H700" stroke="#239a6a" marker-end="url(#arrow)"/>
+
+        <text x="20" y="120" fill="#555"><code>vocab.json</code>：JSON 字典，键为 BPE 子词（如 <code>Ġworld</code> 表示前导空格+world）。</text>
+        <text x="20" y="140" fill="#555"><code>merges.txt</code>：第 1 行 <code>#version: 0.2</code>；之后每行两列符号，定义合并顺序。</text>
+        <text x="20" y="160" fill="#555">id <span class="pill">50256</span> = <code>&lt;|endoftext|&gt;</code>，与 config 中 <code>eos_token_id</code> 一致。</text>
+      </svg>
+    </div>
+    <div class="theory">
+      <span class="tag">原理与公式</span>
+      <p><b>训练 BPE</b>（生成 merges.txt 的过程）：从 256 个字节符号开始，统计语料中所有相邻符号对的出现次数，把最频繁的一对合并成新符号并记录下来，重复 50000 次：</p>
+      \[ (a,b)^{(k)} = \arg\max_{(a,b)} \mathrm{count}(a,b),\qquad \mathrm{rank}\big((a,b)^{(k)}\big) = k,\quad k = 1,\dots,50000 \]
+      <p>merges.txt 的第 \(k\) 行就是第 \(k\) 次合并，所以文件顺序就是优先级。<b>编码</b>时按 rank 从小到大贪心地应用合并（详见 <a href="gpt2_inference_flow.html">推理流程页</a> ①）。词表大小因此是：</p>
+      \[ V = \underbrace{256}_{\text{bytes}} + \underbrace{50000}_{\text{merges}} + \underbrace{1}_{\texttt{&lt;|endoftext|&gt;}} = 50257 \]
+      <p><b>Ġ 的来历</b>：GPT-2 把 256 个字节一一映射到可打印的 Unicode 字符，避免控制字符和空白出现在词表里。空格字节 0x20 被映射成 U+0120，即 "Ġ"，所以 <code>Ġworld</code> 就是 " world"。这样任意字节串都能写成合法的 JSON 字符串存进 vocab.json。</p>
+      <p>英文平均约 1 个 token 对应 4 个字符；中文常常 1 个汉字要 1~3 个 token，因为 GPT-2 训练语料以英文为主，汉字的字节对很少被合并。</p>
+    </div>
+  </div>
+
+  <h2>4. model.safetensors — 二进制布局</h2>
+  <div class="card">
+    <div class="fig">
+      <svg viewBox="0 0 920 210" width="920" height="210" xmlns="http://www.w3.org/2000/svg" font-size="12" font-family="system-ui,sans-serif">
+        <text x="8" y="22" fill="#666">文件字节 0 ─────────────────────────────────────────────────────────────→ EOF</text>
+
+        <rect x="8" y="36" width="72" height="48" rx="4" fill="var(--cfg)" stroke="var(--cfg-stroke)" stroke-width="1.5"/>
+        <text x="44" y="58" text-anchor="middle" font-weight="600">u64</text>
+        <text x="44" y="74" text-anchor="middle" fill="#555">头部长度</text>
+
+        <rect x="88" y="32" width="320" height="56" rx="4" fill="var(--tok)" stroke="var(--tok-stroke)" stroke-width="1.5"/>
+        <text x="248" y="52" text-anchor="middle" font-weight="600">JSON 元数据</text>
+        <text x="248" y="70" text-anchor="middle" fill="#555" font-size="10">__metadata__ · 每个张量名 → dtype, shape, data_offsets</text>
+
+        <rect x="416" y="36" width="48" height="48" rx="4" fill="#eee" stroke="#999"/>
+        <text x="440" y="64" text-anchor="middle" font-size="10">pad</text>
+
+        <rect x="472" y="32" width="440" height="56" rx="4" fill="var(--wt)" stroke="var(--wt-stroke)" stroke-width="1.5"/>
+        <text x="692" y="52" text-anchor="middle" font-weight="600">payload（连续 float32）</text>
+        <text x="692" y="70" text-anchor="middle" fill="#555" font-size="10">按 data_offsets 切片，无需 pickle</text>
+
+        <!-- zoom one tensor -->
+        <rect x="480" y="110" width="200" height="36" rx="3" fill="#fff" stroke="var(--wt-stroke)"/>
+        <text x="580" y="128" text-anchor="middle" font-size="11">h.0.attn.c_attn.weight</text>
+        <text x="580" y="140" text-anchor="middle" font-size="9" fill="#555">[768,2304] F32</text>
+        <rect x="688" y="110" width="120" height="36" rx="3" fill="#fff" stroke="var(--wt-stroke)"/>
+        <text x="748" y="132" text-anchor="middle" font-size="11">下一张量 …</text>
+
+        <text x="8" y="168" fill="#c44">绝对文件偏移 = 8 + header_len + data_offsets[0]</text>
+        <text x="8" y="188" fill="#555">本仓库：<code>__metadata__.format = "pt"</code>；共 160 个张量；无独立 <code>lm_head.weight</code>（与 <code>wte</code> 共享）。</text>
+      </svg>
+    </div>
+    <div class="theory">
+      <span class="tag">原理与公式</span>
+      <p>设文件开头 8 字节（小端 u64）解出的头部长度为 \(N\)，某张量的 <code>data_offsets</code> 为 \([b, e)\)，则：</p>
+      \[ \text{abs\_begin} = 8 + N + b,\qquad \text{nbytes} = e - b = \Big(\prod_{i} \text{shape}_i\Big)\times \mathrm{sizeof}(\text{dtype}) \]
+      <p>本文件前 8 字节是 <code>cb 37 00 00 00 00 00 00</code>，即 \(N = \texttt{0x37cb} = 14283\)。校验：\(8 + 14283 + 548{,}090{,}880 = 548{,}105{,}171\)，正好等于文件大小。张量内部按行优先（C 顺序）排列，二维张量元素 \((i,j)\) 的字节位置为：</p>
+      \[ \mathrm{addr}(i,j) = \text{abs\_begin} + (i\cdot n_{cols} + j)\times 4 \]
+      <p>例如 <code>wte.weight</code> 形状为 \([50257, 768]\)，token 464 的嵌入向量就是从 \(\mathrm{addr}(464, 0)\) 开始的连续 \(768\times4 = 3072\) 字节。因此加载器可以直接 mmap 整个文件，按需取片段，不必先全部读进内存。</p>
+      <p>安全性：头部是纯 JSON，解析只读数据；而 <code>pytorch_model.bin</code> 是 pickle 格式，反序列化时可以执行任意代码。</p>
+    </div>
+  </div>
+
+  <h2>5. 权重在模型结构中的位置</h2>
+  <div class="card">
+    <div class="fig">
+      <svg viewBox="0 0 900 340" width="900" height="340" xmlns="http://www.w3.org/2000/svg" font-size="11" font-family="system-ui,sans-serif">
+        <defs>
+          <marker id="arrow2" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#555"/></marker>
+        </defs>
+        <!-- Embeddings -->
+        <rect x="40" y="40" width="100" height="40" rx="4" fill="var(--wt)" stroke="var(--wt-stroke)"/>
+        <text x="90" y="65" text-anchor="middle">wte</text>
+        <rect x="40" y="90" width="100" height="40" rx="4" fill="var(--wt)" stroke="var(--wt-stroke)"/>
+        <text x="90" y="115" text-anchor="middle">wpe</text>
+        <text x="90" y="150" text-anchor="middle" fill="#555" font-size="10">[50257×768]</text>
+        <text x="90" y="164" text-anchor="middle" fill="#555" font-size="10">[1024×768]</text>
+
+        <!-- Block x12 -->
+        <rect x="180" y="24" width="480" height="200" rx="8" fill="#fafafa" stroke="#bbb" stroke-dasharray="5 4"/>
+        <text x="420" y="44" text-anchor="middle" font-weight="600">Transformer 块 × 12（h.0 … h.11）</text>
+
+        <rect x="200" y="60" width="90" height="32" rx="3" fill="var(--wt)" stroke="var(--wt-stroke)"/>
+        <text x="245" y="80" text-anchor="middle">ln_1</text>
+        <rect x="300" y="52" width="120" height="48" rx="3" fill="var(--wt)" stroke="var(--wt-stroke)"/>
+        <text x="360" y="72" text-anchor="middle">attn</text>
+        <text x="360" y="88" text-anchor="middle" font-size="9" fill="#555">c_attn, c_proj, bias</text>
+        <rect x="440" y="60" width="90" height="32" rx="3" fill="var(--wt)" stroke="var(--wt-stroke)"/>
+        <text x="485" y="80" text-anchor="middle">ln_2</text>
+        <rect x="540" y="52" width="100" height="48" rx="3" fill="var(--wt)" stroke="var(--wt-stroke)"/>
+        <text x="590" y="72" text-anchor="middle">mlp</text>
+        <text x="590" y="88" text-anchor="middle" font-size="9" fill="#555">c_fc, c_proj</text>
+
+        <path d="M140 80 H200" stroke="#666" marker-end="url(#arrow2)"/>
+        <path d="M290 80 H300" stroke="#666" marker-end="url(#arrow2)"/>
+        <path d="M420 80 H440" stroke="#666" marker-end="url(#arrow2)"/>
+        <path d="M530 80 H540" stroke="#666" marker-end="url(#arrow2)"/>
+        <path d="M640 76 H680 V80 H720" stroke="#666" fill="none" marker-end="url(#arrow2)"/>
+
+        <rect x="720" y="60" width="80" height="40" rx="4" fill="var(--wt)" stroke="var(--wt-stroke)"/>
+        <text x="760" y="85" text-anchor="middle">ln_f</text>
+
+        <rect x="720" y="120" width="120" height="48" rx="4" fill="var(--flow)" stroke="var(--flow-stroke)"/>
+        <text x="780" y="142" text-anchor="middle">lm_head</text>
+        <text x="780" y="158" text-anchor="middle" font-size="9" fill="#555">权重 = wte</text>
+        <path d="M760 100 V120" stroke="#7c4ddb" marker-end="url(#arrow2)"/>
+        <path d="M90 40 V20 H780 V120" stroke="#7c4ddb" stroke-dasharray="4 3" fill="none"/>
+        <text x="400" y="18" text-anchor="middle" fill="#7c4ddb" font-size="10">weight tying</text>
+
+        <text x="200" y="200" fill="#555">MLP 中间维 3072 = 4 × 768（GPT-2 标准 FFN 扩展倍数）</text>
+        <text x="200" y="218" fill="#555">attn.c_attn：单矩阵同时投影 Q、K、V（2304 = 3×768）</text>
+
+        <table x="40" y="240"><!-- fallback text below -->
+        </table>
+      </svg>
+    </div>
+    <table>
+      <thead><tr><th>张量名前缀</th><th>数量（约）</th><th>说明</th></tr></thead>
+      <tbody>
+        <tr><td><code>wte</code> / <code>wpe</code></td><td>各 1</td><td>词嵌入 + 位置嵌入</td></tr>
+        <tr><td><code>h.{0..11}.*</code></td><td>13×12</td><td>每块：2×LayerNorm、Attention、MLP（含 bias/mask）</td></tr>
+        <tr><td><code>ln_f</code></td><td>2</td><td>最终 LayerNorm 的 weight / bias</td></tr>
+      </tbody>
+    </table>
+    <div class="theory"><span class="tag">原理与公式</span>
+      <p>GPT-2 的线性层用 <code>Conv1D</code> 实现（名字是历史遗留，实际就是全连接层），权重形状为 <code>(in, out)</code>：</p>
+      \[ y = xW + b,\qquad W \in \mathbb{R}^{d_{in}\times d_{out}} \]
+      <p>而 PyTorch <code>nn.Linear</code> 是 \(y = xW^\top + b,\ W\in\mathbb{R}^{d_{out}\times d_{in}}\)。所以 <code>c_attn.weight</code> 是 \([768, 2304]\)，而 LLaMA 等模型的 <code>q_proj.weight</code> 是 \([out, in]\)。把 GPT-2 权重转成 <code>nn.Linear</code> 风格时需要转置。各张量在前向公式中的位置（\(W_{mp}\) 即 <code>mlp.c_proj</code>）：</p>
+      \[ \begin{aligned} X^{(0)} &= W_{te}[\mathbf{x}] + W_{pe}[0{:}T] \\ U &= X^{(\ell-1)} + \mathrm{Attn}\big(\mathrm{LN}_{\gamma_1,\beta_1}(X^{(\ell-1)});\ W_{attn}, b_{attn}, W_{proj}, b_{proj}\big) \\ X^{(\ell)} &= U + \mathrm{GELU}\big(\mathrm{LN}_{\gamma_2,\beta_2}(U)\,W_{fc} + b_{fc}\big)\,W_{mp} + b_{mp} \\ z &= \mathrm{LN}_{f}\big(X^{(12)}\big)\,W_{te}^{\top} \end{aligned} \]
+      <p>最后一行就是 weight tying：输出投影直接用 \(W_{te}^\top\)，所以文件里没有 <code>lm_head.weight</code>，加载时要让 lm_head 指向 wte 的同一块内存。逐步的张量形状见 <a href="gpt2_inference_flow.html">推理流程页</a>。</p>
+    </div>
+  </div>
+
+  <h2>6. 从 Hub 下载时还可能看到什么？</h2>
+  <div class="card">
+    <table>
+      <thead><tr><th>文件</th><th>本目录</th><th>常见完整仓库</th></tr></thead>
+      <tbody>
+        <tr><td><code>tokenizer.json</code></td><td>—</td><td>Fast tokenizer 序列化（与 vocab/merges 等价信息，格式不同）</td></tr>
+        <tr><td><code>generation_config.json</code></td><td>—</td><td>默认 <code>max_new_tokens</code>、采样温度等（不改变权重）</td></tr>
+        <tr><td><code>pytorch_model.bin</code></td><td>—</td><td>旧版 PyTorch pickle 权重（逐渐被 safetensors 替代）</td></tr>
+        <tr><td><code>model-xxxxx-of-yyyyy.safetensors</code> + <code>*.index.json</code></td><td>—</td><td>大模型分片；逻辑名 → 物理文件映射</td></tr>
+      </tbody>
+    </table>
+    <p class="note">下载示例：<code>huggingface-cli download gpt2 --local-dir data/gpt2</code></p>
+    <div class="theory"><span class="tag">原理与公式</span>
+      <p><b>分片索引</b>：大模型的 <code>model.safetensors.index.json</code> 里有一个 <code>weight_map</code>，本质上是一个从张量名到文件名的映射，各分片的张量名互不重叠、合起来覆盖全部参数：</p>
+      \[ \mathrm{shard}: \text{tensor name} \mapsto \text{file name},\qquad \bigsqcup_{k} \mathrm{keys}(\text{shard}_k) = \text{all tensor names} \]
+      <p>每个分片本身仍是一个独立、合法的 safetensors 文件，加载器先读 index，再按需打开对应分片。</p>
+      <p><b>generation_config.json</b> 里的参数只作用于"logits 到下一个 token"这一步。例如温度 \(\tau\) 与重复惩罚 \(r \gt 1\)（第二个式子只作用于已经出现过的 token）：</p>
+      \[ p_v \propto \exp(z_v/\tau),\qquad z_v \leftarrow \begin{cases} z_v / r, & z_v \gt 0 \\ z_v \cdot r, & z_v \le 0 \end{cases} \]
+      <p>它们完全不涉及权重，只改变采样方式。</p>
+    </div>
+  </div>
+
+  <h2>7. 与本项目 INFR 格式对照</h2>
+  <div class="card">
+    <p class="note" style="margin-top:0">
+      本仓库自研 <a href="infr_format.html">INFR（.inference）</a> 同样采用「元数据 + 原始字节」思路，但张量命名与用途针对 MNIST 演示。
+      Hub 的 <code>safetensors</code> 则是跨框架通用权重交换格式，适合对照学习如何按名称加载 <code>h.0.attn.c_attn.weight</code> 这类参数。
+    </p>
+    <div class="theory"><span class="tag">原理与公式</span>
+      <p>两种格式的寻址公式结构相同，只是"数据区起点"的记录方式不同：safetensors 由头部长度推出，INFR 直接存一个 <code>data_start</code> 字段。</p>
+      \[ \text{safetensors:}\ \ \text{abs} = 8 + N + b \qquad\qquad \text{INFR:}\ \ \text{abs} = \text{data\_start} + \text{offset} \]
+      <p>两者都满足 \(\text{nbytes} = \prod_i \text{shape}_i \times 4\)（fp32）。因此给 <code>ModelFile</code> 增加 safetensors 支持只需三步：读 8 字节得到 \(N\)；解析 JSON 得到每个张量的 dtype、shape、offsets；令数据区起点为 \(8+N\)。其余的切片与拷贝逻辑可以直接复用。</p>
+    </div>
+  </div>
+
+  <p class="sub" style="margin-top:28px">
+    示例路径：<code>data/gpt2/config.json</code> · <code>vocab.json</code> · <code>merges.txt</code> · <code>model.safetensors</code>
+  </p>
+</main>
+<script>
+document.addEventListener("DOMContentLoaded", () => {
+  if (!window.renderMathInElement) return;
+  renderMathInElement(document.body, {
+    delimiters: [{ left: "\\[", right: "\\]", display: true }, { left: "\\(", right: "\\)", display: false }],
+    strict: false,
+  });
+});
+</script>
+</body>
+</html>

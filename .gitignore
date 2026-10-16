@@ -10,3 +10,4 @@ compile_commands.json
 *.pyc
 *.gz
 *.inference
+data/gpt2/

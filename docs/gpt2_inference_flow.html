@@ -1,0 +1,432 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>GPT-2 · 逐步推理与张量形状（矩阵示意）</title>
+<style>
+  :root {
+    --paper: #fbfaf6; --ink: #222; --muted: #6b6b6b; --line: #e4e1d8;
+    --hand: "Comic Sans MS", "Segoe Print", "Kalam", "Xiaolai SC", cursive;
+    --mono: "JetBrains Mono", Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: #ecebe6; color: var(--ink); font-family: system-ui, "PingFang SC", "Microsoft YaHei", sans-serif; }
+  main { max-width: 1100px; margin: 0 auto; padding: 24px 16px 60px; }
+  h1 { font-family: var(--hand); font-size: 1.6rem; margin: 0 0 6px; }
+  .sub { color: var(--muted); margin: 0 0 18px; line-height: 1.6; }
+  h2 { font-family: var(--hand); font-size: 1.3rem; margin: 34px 0 10px; padding-bottom: 4px; border-bottom: 2px dashed #bbb; }
+  .card { background: var(--paper); border: 1px solid var(--line); border-radius: 6px; padding: 14px 18px 12px; margin: 12px 0; box-shadow: 0 1px 3px rgba(0,0,0,.06); }
+  .card h3 { font-family: var(--hand); margin: 0 0 4px; font-size: 1.08rem; }
+  .fig { overflow-x: auto; }
+  .fig svg { display: block; }
+  pre { font-family: var(--mono); font-size: 12.5px; background: #f1efe8; border-left: 3px solid #c9c3b3; padding: 6px 10px; margin: 6px 0; overflow-x: auto; }
+  .note { font-size: 13.5px; line-height: 1.7; color: #333; margin: 4px 0 0; }
+  .legend { display: flex; flex-wrap: wrap; gap: 14px; font-size: 13px; margin: 6px 0 4px; }
+  .legend span { display: inline-flex; align-items: center; gap: 6px; }
+  .legend i { width: 18px; height: 12px; border: 1.5px solid; border-radius: 2px; display: inline-block; }
+  table { border-collapse: collapse; font-size: 13px; margin-top: 6px; width: 100%; }
+  th, td { border: 1px solid var(--line); padding: 4px 10px; text-align: left; vertical-align: top; }
+  th { background: #f1efe8; }
+  code { font-family: var(--mono); font-size: 12.5px; }
+  .red { color: #d23c3c; font-weight: 600; }
+  a { color: #2f6fd6; }
+  .theory { margin-top: 10px; padding: 8px 14px; background: #f7f4fd; border-left: 3px solid #7c4ddb; border-radius: 4px; font-size: 13.5px; line-height: 1.75; }
+  .theory .tag { font-family: var(--hand); font-weight: 600; color: #7c4ddb; }
+  .theory p { margin: 4px 0; }
+  .theory ul { margin: 4px 0; padding-left: 1.3em; }
+  .theory .katex-display { margin: 6px 0; overflow-x: auto; overflow-y: hidden; padding: 2px 0; }
+</style>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" />
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
+</head>
+<body>
+<main>
+  <h1>GPT-2：从文本到下一 token 预测</h1>
+  <p class="sub">
+    对应本仓库 <a href="../data/gpt2/"><code>data/gpt2/</code></a>（GPT-2 small）。
+    为便于画图，固定 <code>B = 1</code>（单条序列）、<code>T = 4</code>（4 个 token）、隐藏维 <code>d = 768</code>、头数 <code>H = 12</code>、每头 <code>d<sub>h</sub> = 64</code>、词表 <code>V = 50257</code>；完整模型堆叠 <code>12</code> 个相同结构的块。
+    方块大小按 √维度 缩放。<span class="red">红色维度</span> 为矩阵乘中被求和消掉的内维。
+    相关文件说明见 <a href="huggingface_model_files.html">huggingface_model_files.html</a>。
+  </p>
+  <div class="legend" id="legend"></div>
+  <div id="content"></div>
+</main>
+
+<script>
+const KIND = {
+  data:  { name: "输入 / id",    stroke: "#2f6fd6", fill: "#e3edfc" },
+  param: { name: "权重 W / b",   stroke: "#d98a00", fill: "#fdf0d6" },
+  act:   { name: "中间激活",     stroke: "#239a6a", fill: "#dff4ea" },
+  attn:  { name: "注意力相关",   stroke: "#7c4ddb", fill: "#ece4fb" },
+  mask:  { name: "掩码",         stroke: "#777",    fill: "#ececec" },
+  out:   { name: "logits / 预测", stroke: "#0f8b9c", fill: "#dcf3f6" },
+  cache: { name: "KV cache",     stroke: "#b5527a", fill: "#fbe6ef" },
+};
+const HL = "#d23c3c";
+
+const M = (r, c, name, kind, opt = {}) => ({ k: "m", r, c, name, kind, ...opt });
+const V = (n, name, kind, opt = {}) => M(1, n, name, kind, opt);
+const O = (s) => ({ k: "o", s });
+const A = (s) => ({ k: "a", s });
+
+const SECTIONS = [
+  { title: "一、分词：文本 → token id", steps: [
+    { title: "① BPE 编码（vocab.json + merges.txt）",
+      items: [M(1, 12, "文本", "data", { rl: "1" }), A("BPE 分词器"), M(1, 4, "input_ids", "data")],
+      code: 'ids = tokenizer("The cat sat.", return_tensors="pt")["input_ids"]\n# 示意: [[ 464, 3797, 3332, 13 ]]  → shape (1, T), T=4',
+      note: "每个整数是词表下标，范围 0 … 50256。id 50256 是 <|endoftext|>。模型只吃 id，不直接吃 Unicode 字符串。" },
+    { title: "② 位置下标 position_ids",
+      items: [M(1, 4, "input_ids", "data"), A("arange(T)"), M(1, 4, "position_ids", "data")],
+      code: "position_ids = torch.arange(T).unsqueeze(0)   # [[0, 1, 2, 3]]",
+      note: "第 t 个 token 用第 t 个位置向量；最大长度由 config 的 n_ctx=1024 限制。" },
+  ]},
+  { title: "二、嵌入层：id → 初始 hidden", steps: [
+    { title: "③ 词嵌入查表 wte（等价于 one-hot @ W）",
+      items: [M(1, 4, "input_ids", "data"), A("index wte"), M(4, 768, "tok_emb", "act", { rl: "T" })],
+      code: "tok_emb = wte(input_ids)          # wte.weight: (50257, 768)\n# 实现上: tok_emb[b,t,:] = wte.weight[input_ids[b,t]]",
+      note: "逻辑上是 (1,4) 的 one-hot（每行 50257 维里只有一个 1）左乘 (50257,768)，得到 (4,768)。下图把 batch 维 1 省略，行维就是序列长度 T。" },
+    { title: "④ 位置嵌入 wpe + 相加",
+      items: [M(4, 768, "tok_emb", "act"), O("+"), M(4, 768, "pos_emb", "act"), O("="), M(4, 768, "x⁽⁰⁾", "act")],
+      code: "pos_emb = wpe(position_ids)     # wpe.weight: (1024, 768)\nx = tok_emb + pos_emb             # (1, T, 768) 或 (T, 768)",
+      note: "x⁽⁰⁾ 是进入第 1 个 Transformer 块之前的张量；之后每块输出 x⁽ℓ⁾，共 12 层。" },
+  ]},
+  { title: "三、单个 Transformer 块（第 ℓ 层，重复 12 次）", steps: [
+    { title: "⑤ LayerNorm-1（逐 token，形状不变）",
+      items: [M(4, 768, "x⁽ℓ⁻¹⁾", "act"), A("LayerNorm"), M(4, 768, "x̂", "act")],
+      code: "x_hat = layer_norm_1(x)   # 用 h.{ℓ}.ln_1.weight / bias",
+      note: "对每一行（每个 token 的 768 维向量）单独做均值方差归一化，再缩放平移。不混合不同 token。" },
+    { title: "⑥ 合并线性层 c_attn：一次算出 Q、K、V",
+      items: [M(4, 768, "x̂", "act", { hc: 768 }), O("@"), M(768, 2304, "W_attn", "param", { hr: 768 }), O("+"), V(2304, "b_attn", "param"), O("="), M(4, 2304, "qkv", "attn")],
+      code: "qkv = x_hat @ W_attn + b_attn    # W_attn: (768, 2304), 2304 = 3*d",
+      note: "内维 768 被消掉：qkv[t, :] 是位置 t 上 Q∥K∥V 拼接。权重来自 safetensors 的 h.{ℓ}.attn.c_attn.weight。" },
+    { title: "⑦ 拆成 Q、K、V 并分头",
+      items: [M(4, 2304, "qkv", "attn"), A("reshape → 3×(T,H,dh)"), M(12, 256, "Q (示意)", "attn", { rl: "H·T", cl: "T·dh" })],
+      code: "Q, K, V = split(qkv, 3, dim=-1)   # 各 (T, 768)\nQ = Q.view(T, H, dh).transpose(0,1)  # (H, T, dh)",
+      note: "12 个头并行：每个头只看 64 维子空间。图中用 (12, 256) 表示 H=12 个头、每头 T×dh=4×64=256 个元素排成矩阵，便于和下一步 (T,T) 注意力对齐。" },
+    { title: "⑧ 注意力分数：Q Kᵀ / √d_h（每个头一张 T×T）",
+      items: [M(4, 64, "Q_h", "attn", { hc: 64 }), O("@"), M(64, 4, "K_hᵀ", "attn", { hr: 64 }), O("="), M(4, 4, "scores_h", "attn")],
+      code: "scores = Q @ K.transpose(-2,-1) / sqrt(dh)   # (H, T, T)",
+      note: "对固定头 h，scores[t, s] 表示「位置 t 的 query 对位置 s 的 key 有多匹配」。内维 d_h=64 求和。GPT-2 是因果模型：后面还会 mask 掉 s>t。" },
+    { title: "⑨ 因果掩码 + softmax（按最后一维）",
+      items: [M(4, 4, "scores_h", "attn"), O("+"), M(4, 4, "causal_mask", "mask"), A("softmax 行"), M(4, 4, "A_h", "attn")],
+      code: "mask = (1 - triu(ones(T,T))) * -1e10   # 上三角未来位\nweights = softmax(scores + mask, dim=-1)",
+      note: "位置 t 只能看见 s ≤ t。softmax 后每行和为 1，A_h[t,s] 是「t 从 s 取值」的权重。h.{ℓ}.attn.bias 里还存有 broadcast 用的大 mask 缓冲。" },
+    { title: "⑩ 加权求和 V → 拼头 → c_proj",
+      items: [M(4, 4, "A_h", "attn", { hc: 4 }), O("@"), M(4, 64, "V_h", "attn", { hr: 4 }), O("="), M(4, 64, "head_out", "attn"), A("拼头+线性"), M(4, 768, "attn_out", "act")],
+      code: "ctx = A @ V                        # (H, T, dh)\nattn_out = merge_heads(ctx) @ W_proj + b_proj",
+      note: "内维 T=4 在 A @ V 时被消掉：每个位置得到 dh 维混合向量。12 头拼回 768，再经 c_proj (768→768)。" },
+    { title: "⑪ 残差连接（注意力子层）",
+      items: [M(4, 768, "x⁽ℓ⁻¹⁾", "act"), O("+"), M(4, 768, "attn_out", "act"), O("="), M(4, 768, "u", "act")],
+      code: "u = x + attn_out    # 代码里 dropout 可忽略",
+      note: "残差让梯度更容易训练；形状始终保持 (T, d)。" },
+    { title: "⑫ LayerNorm-2 + MLP 升维（GELU）",
+      items: [M(4, 768, "u", "act", { hc: 768 }), A("LN2"), O("@"), M(768, 3072, "W_fc", "param", { hr: 768 }), A("GELU"), M(4, 3072, "m", "act")],
+      code: "m = gelu(layer_norm_2(u) @ W_fc + b_fc)   # 3072 = 4*768",
+      note: "FFN 先把 768 扩到 4 倍，激活用 config 里的 gelu_new。对应 h.{ℓ}.mlp.c_fc.*。" },
+    { title: "⑬ MLP 降维 + 残差 → 块输出 x⁽ℓ⁾",
+      items: [M(4, 3072, "m", "act", { hc: 3072 }), O("@"), M(3072, 768, "W_proj", "param", { hr: 3072 }), O("+"), M(4, 768, "u", "act"), O("="), M(4, 768, "x⁽ℓ⁾", "act")],
+      code: "x = u + m @ W_proj + b_proj\n# ℓ = 0..11 重复整块，得到 x⁽¹²⁾",
+      note: "内维 3072 被消掉，回到 (T,768)。12 层后得到最终隐状态 h = x⁽¹²⁾。" },
+  ]},
+  { title: "四、语言模型头：隐状态 → 词表 logits", steps: [
+    { title: "⑭ 最终 LayerNorm",
+      items: [M(4, 768, "h", "act"), A("ln_f"), M(4, 768, "h̃", "act")],
+      code: "h_tilde = layer_norm_f(h)",
+      note: "对 12 层堆叠后的输出做一次全局 LN（ln_f.weight / bias）。" },
+    { title: "⑮ lm_head（与 wte 共享权重）",
+      items: [M(4, 768, "h̃", "act", { hc: 768 }), O("@"), M(768, 50257, "W_teᵀ", "param", { hr: 768 }), O("="), M(4, 50257, "logits", "out")],
+      code: "logits = h_tilde @ wte.weight.T    # 无单独 lm_head.weight",
+      note: "每一行是「该位置下一个 token」在未归一化分数上的分布。V=50257 很大，图中矩阵很宽只表示相对大小。weight tying：输出层与词嵌入共用 wte。" },
+    { title: "⑯ 取最后一个位置 → softmax → 预测 token",
+      items: [M(1, 50257, "logits[-1]", "out"), A("softmax"), M(1, 50257, "probs", "out"), A("argmax"), M(1, 1, "next_id", "out")],
+      code: "next_logits = logits[0, -1, :]           # 最后一个 token 位置\nprobs = softmax(next_logits)\nnext_id = argmax(probs)   # 或 sample(multinomial)",
+      note: "因果 LM：位置 t 的 logits 预测「紧跟在 input[t] 后面的 token」。整句推理时通常看最后一个位置，得到下一个词 id；再把 id 拼回输入，重复 ⑮⑯ 即自回归生成。" },
+    { title: "⑰ id 解码回文本（可选）",
+      items: [M(1, 1, "next_id", "out"), A("tokenizer.decode"), M(1, 6, "下一词", "out", { rl: "1" })],
+      code: 'tokenizer.decode([next_id])   # 例如 " on"',
+      note: "预测结果是离散 id；要给人看需走分词器逆向。训练时用交叉熵：把 logits 与「真实下一个 id」对齐，而非本页的 argmax 演示。" },
+  ]},
+  { title: "五、自回归生成（多步预测，概念）", steps: [
+    { title: "⑱ 循环：拼 token → 再前向",
+      items: [M(1, 4, "input_ids", "data"), A("前向 ②~⑯"), M(1, 1, "next_id", "out"), A("concat"), M(1, 5, "input_ids'", "data")],
+      code: "for _ in range(max_new_tokens):\n    logits = model(input_ids).logits\n    next_id = sample(logits[:, -1, :])\n    input_ids = cat([input_ids, next_id], dim=1)",
+      note: "每步 T 增 1，每步都把整段序列重新前向一遍：旧位置的 K、V 被反复重算，注意力分数是 (T, T)。超过 1024 需截断或换更长上下文模型。下一节的 KV cache 就是为了去掉这部分重复计算。" },
+  ]},
+  { title: "六、KV cache：只算新 token，复用旧的 K / V", steps: [
+    { title: "⑲ Prefill：处理提示词，顺便把 K、V 存下来",
+      items: [M(4, 2304, "qkv", "attn"), A("split, 分头"), M(4, 64, "K_h", "cache", { rl: "T" }), O(","), M(4, 64, "V_h", "cache", { rl: "T" }), A("存入第 ℓ 层"), M(4, 64, "K_cache_h", "cache", { rl: "T" })],
+      code: "# 第一次调用：整段 prompt 正常前向（与 ⑤~⑬ 完全相同）\nout = model(input_ids, use_cache=True)\npast = out.past_key_values   # 12 层，每层 (K, V)，各 (B, H, T, dh) = (1, 12, 4, 64)",
+      note: "K、V 只取决于该位置自己的 token 和之前的层，后来的 token 不会改变它们（因果 mask 保证这一点），所以算一次就可以一直复用。Q 不需要缓存：旧位置的 query 只在预测它自己的下一个 token 时用过一次。" },
+    { title: "⑳ Decode：新 token 只有 1 行",
+      items: [M(1, 768, "x_new", "act", { hc: 768 }), O("@"), M(768, 2304, "W_attn", "param", { hr: 768 }), O("+"), V(2304, "b_attn", "param"), O("="), M(1, 2304, "qkv_new", "attn")],
+      code: "out = model(next_id, past_key_values=past, use_cache=True)   # next_id: (1, 1)\n# 嵌入: wte[next_id] + wpe[T]   注意位置下标是 T=4，而不是 0",
+      note: "输入从 (T, 768) 变成 (1, 768)，所有线性层（c_attn、c_proj、c_fc、mlp.c_proj、lm_head）的计算量都缩小为原来的 1/T。位置嵌入要用新 token 的真实位置 T，否则位置信息错乱。" },
+    { title: "㉑ 把新的 k、v 追加到缓存末尾",
+      items: [M(4, 64, "K_cache_h", "cache", { rl: "T" }), O("∥"), M(1, 64, "k_new_h", "attn"), O("="), M(5, 64, "K_cache_h'", "cache", { rl: "T+1" })],
+      code: "K = cat([past_K, k_new], dim=-2)   # (1, 12, 4, 64) ∥ (1, 12, 1, 64) → (1, 12, 5, 64)\nV = cat([past_V, v_new], dim=-2)",
+      note: "沿序列维（T 维）拼接，V 同理。每生成一个 token，每层的 K、V 缓存各长 1 行；12 层都要做。" },
+    { title: "㉒ 注意力分数：只有 1 行，不再是 T×T",
+      items: [M(1, 64, "q_new_h", "attn", { hc: 64 }), O("@"), M(64, 5, "K_cache_h'ᵀ", "cache", { hr: 64, cl: "T+1" }), O("="), M(1, 5, "scores_h", "attn", { cl: "T+1" })],
+      code: "scores = q_new @ K.transpose(-2, -1) / sqrt(dh)   # (1, 12, 1, 5)\nweights = softmax(scores, dim=-1)                 # 不需要因果 mask",
+      note: "新 token 是序列最后一个位置，本来就可以看到所有 s ≤ T，因此不需要 mask。对比无缓存：⑧ 的 scores 是 (T+1, T+1)，其中前 T 行都是上一步算过的结果。" },
+    { title: "㉓ 加权求和缓存的 V → 输出 1 行",
+      items: [M(1, 5, "A_h", "attn", { hc: 1, cl: "T+1" }), O("@"), M(5, 64, "V_cache_h'", "cache", { hr: 1, rl: "T+1" }), O("="), M(1, 64, "head_out", "attn"), A("拼头 + c_proj"), M(1, 768, "attn_out", "act")],
+      code: "ctx = weights @ V    # (1, 12, 1, 64)\nattn_out = merge_heads(ctx) @ W_proj + b_proj   # (1, 768)",
+      note: "内维 T+1=5 被求和消掉。后面的残差、LN、MLP 与 ⑪~⑬ 一样，只是行数是 1。" },
+    { title: "㉔ 一路到 logits：直接得到下一个 token",
+      items: [M(1, 768, "h̃_new", "act", { hc: 768 }), O("@"), M(768, 50257, "W_teᵀ", "param", { hr: 768 }), O("="), M(1, 50257, "logits", "out"), A("argmax"), M(1, 1, "next_id", "out")],
+      code: "next_id = argmax(out.logits[:, -1, :])\npast = out.past_key_values   # 长度变为 T+1，下一轮继续传入",
+      note: "logits 只有 1 行，就是下一个 token 的分布，不用再取 [-1]（虽然取了也一样）。然后回到 ⑳，循环到生成结束。" },
+    { title: "㉕ 缓存总大小：随序列长度线性增长",
+      items: [V(1, "1 个 token", "data"), A("× 12 层 × (K, V)"), M(24, 768, "新增 cache", "cache", { rl: "2·L", cl: "H·dh" }), A("× T"), M(24, 768, "总 cache × T", "cache", { rl: "2·L", cl: "H·dh" })],
+      code: "# 完整形状: 12 层 × 2 × (B, H, T, dh)\nper_token = 2 * n_layer * n_embd            # 2 × 12 × 768 = 18432 个数\nbytes_fp32 = per_token * 4                  # ≈ 72 KB / token\n# T = 1024 时 ≈ 72 MB（B=1, fp32）；fp16 减半",
+      note: "缓存大小 = 2 × 层数 × 隐藏维 × 序列长度 × batch × 每元素字节数。GPT-2 small 不大，但大模型（几十层、几千维、长上下文、batch 很大）时 KV cache 往往比权重还占显存，所以有 MQA/GQA、分页缓存（PagedAttention）、量化缓存等优化。" },
+  ]},
+];
+
+const THEORY = {
+  "①": String.raw`
+    <p>GPT-2 使用<b>字节级 BPE</b>（Byte Pair Encoding）。文本先用正则预切分成词块（如 <code>" cat"</code>），每个 UTF-8 字节映射成 256 个基础符号之一，因此任何字符串都能编码，不存在"未知词"。然后对每个词块反复执行：在所有相邻符号对中，找 <code>merges.txt</code> 里排名最靠前的一对合并，直到没有可合并的对为止：</p>
+    \[ (a^*, b^*) = \arg\min_{(a,b)\in \mathrm{pairs}(w)} \mathrm{rank}(a,b), \qquad w \leftarrow \mathrm{merge}(w,\, a^*, b^*) \]
+    <p>最后把每个子词查 <code>vocab.json</code> 得到 id：</p>
+    \[ \mathrm{id}_t = \mathrm{vocab}[w_t],\qquad \mathbf{x} = (\mathrm{id}_1,\dots,\mathrm{id}_T) \in \{0,\dots,V-1\}^{T} \]
+    <p>词表大小正好是 \(V = 256 + 50000 + 1 = 50257\)：256 个基础字节、50000 次合并各产生一个新符号、再加 1 个特殊符号 <code>&lt;|endoftext|&gt;</code>。</p>`,
+  "②": String.raw`
+    <p>自注意力本身不感知顺序：如果去掉因果掩码，把输入的行打乱，输出也只是以同样方式被打乱（置换等变），其中 \(P\) 为任意置换矩阵：</p>
+    \[ \mathrm{Attn}(PX) = P\,\mathrm{Attn}(X) \]
+    <p>所以必须显式注入位置信息。GPT-2 使用<b>可学习的绝对位置嵌入</b>：位置下标 \(p_t = t,\ t = 0,\dots,T-1\)，并要求 \(T \le n_{ctx} = 1024\)，因为 <code>wpe</code> 只有 1024 行。后来的模型（如 LLaMA）多改用 RoPE 这类相对位置编码。</p>`,
+  "③": String.raw`
+    <p>嵌入矩阵 \(W_{te} \in \mathbb{R}^{V\times d}\) 的第 \(v\) 行就是 token \(v\) 的向量。查表在数学上等价于 one-hot 行向量乘矩阵：</p>
+    \[ e_t = \mathrm{onehot}(\mathrm{id}_t)^{\top} W_{te} = W_{te}[\mathrm{id}_t,\,:\,] \in \mathbb{R}^{d} \]
+    \[ \big(\mathrm{onehot}(\mathrm{id}_t)^{\top} W_{te}\big)_j = \sum_{v=0}^{V-1} \mathbb{1}[v=\mathrm{id}_t]\; W_{te}[v,j] = W_{te}[\mathrm{id}_t,\, j] \]
+    <p>求和中只有一项非零，所以实现时直接拷贝一行，代价是 \(O(d)\) 而不是 \(O(Vd)\)。</p>`,
+  "④": String.raw`
+    \[ x^{(0)}_t = W_{te}[\mathrm{id}_t] + W_{pe}[t],\qquad X^{(0)} \in \mathbb{R}^{T\times d} \]
+    <p>用相加而不是拼接，维度保持 \(d\)。768 维空间足够大，训练后词信息和位置信息大致落在不同的子空间，后续线性层可以把它们分开读取。训练时这里有 dropout（<code>embd_pdrop = 0.1</code>），推理时关闭。此后这个 \(T\times d\) 张量在 12 层之间一路传递、不断被累加，常被称为<b>残差流</b>（residual stream）。</p>`,
+  "⑤": String.raw`
+    <p>对每个 token 的向量 \(x\in\mathbb{R}^d\) 单独计算均值和方差。统计只在特征维上做，与 batch 大小、序列长度无关，所以推理时不需要像 BatchNorm 那样保存 running statistics：</p>
+    \[ \mu = \frac{1}{d}\sum_{i=1}^{d} x_i,\qquad \sigma^2 = \frac{1}{d}\sum_{i=1}^{d}(x_i-\mu)^2 \]
+    \[ \mathrm{LN}(x)_i = \gamma_i\,\frac{x_i-\mu}{\sqrt{\sigma^2+\varepsilon}} + \beta_i,\qquad \varepsilon = 10^{-5} \]
+    <p>\(\gamma\)、\(\beta\) 就是 <code>ln_1.weight</code>、<code>ln_1.bias</code>，\(\varepsilon\) 来自 config 的 <code>layer_norm_epsilon</code>。GPT-2 采用 <b>Pre-LN</b>：归一化放在每个子层之前，残差路径本身不归一化，这让深层网络训练更稳定。</p>`,
+  "⑥": String.raw`
+    \[ [\,Q \;\|\; K \;\|\; V\,] = \hat{X} W_{attn} + b_{attn},\qquad W_{attn}\in\mathbb{R}^{d\times 3d} \]
+    \[ \mathrm{qkv}_{t,j} = \sum_{i=1}^{d} \hat{x}_{t,i}\, W_{attn}[i,j] + b_j \]
+    <p>它等价于三个独立投影 \(Q=\hat XW_Q,\ K=\hat XW_K,\ V=\hat XW_V\)，只是把 \(W_Q, W_K, W_V\) 按列拼成一个大矩阵，一次矩阵乘算完，效率更高。</p>
+    <p>注意 GPT-2 的线性层是 <code>Conv1D</code>，权重按 <code>(in, out)</code> 存储，所以写作 \(XW\)；PyTorch 的 <code>nn.Linear</code> 按 <code>(out, in)</code> 存储，要写成 \(XW^\top\)。自己加载 safetensors 时最容易在这里弄反。计算量为 \(2 \cdot T \cdot d \cdot 3d\) 次浮点运算（一次乘加计 2 次）。</p>`,
+  "⑦": String.raw`
+    \[ d_h = \frac{d}{H} = \frac{768}{12} = 64,\qquad Q^{(h)} = Q\big[\,:,\ (h-1)d_h : h\,d_h\,\big] \in \mathbb{R}^{T\times d_h},\quad h = 1,\dots,H \]
+    <p>reshape 只改变索引方式，不移动数据。多头的思路是：与其做一个 768 维的注意力，不如并行做 12 个 64 维的注意力，每个头可以学一种不同的关注模式（例如关注前一个词、关注句子主语）。总计算量与单头 768 维相同。</p>`,
+  "⑧": String.raw`
+    \[ S^{(h)} = \frac{Q^{(h)} K^{(h)\top}}{\sqrt{d_h}},\qquad S^{(h)}_{t,s} = \frac{1}{\sqrt{d_h}} \sum_{i=1}^{d_h} q_{t,i}\, k_{s,i} \]
+    <p>点积越大，表示 query 和 key 的方向越一致。为什么要除以 \(\sqrt{d_h}\)？假设 \(q, k\) 的各分量独立、均值为 0、方差为 1，则</p>
+    \[ \mathrm{Var}(q\cdot k) = \sum_{i=1}^{d_h}\mathrm{Var}(q_i k_i) = d_h \]
+    <p>点积的标准差为 \(\sqrt{d_h}=8\)。softmax 的输入过大时输出接近 one-hot，梯度几乎为 0；除以 \(\sqrt{d_h}\) 把方差拉回 1。这一步对所有头的计算量为 \(2\cdot H\cdot T^2 \cdot d_h = 2T^2 d\)，随序列长度平方增长。</p>`,
+  "⑨": String.raw`
+    \[ M_{t,s} = \begin{cases} 0, & s \le t \\ -\infty, & s \gt t \end{cases} \qquad A^{(h)} = \mathrm{softmax}\big(S^{(h)} + M\big) \]
+    \[ A_{t,s} = \frac{\exp(S_{t,s}+M_{t,s})}{\sum_{s'=1}^{T}\exp(S_{t,s'}+M_{t,s'})} = \frac{\exp(S_{t,s})\;\mathbb{1}[s\le t]}{\sum_{s'\le t}\exp(S_{t,s'})} \]
+    <p>原因是语言模型用链式法则把整句话的概率分解成逐个条件概率：</p>
+    \[ p(x_1,\dots,x_T) = \prod_{t=1}^{T} p(x_t \mid x_{\lt t}) \]
+    <p>位置 \(t\) 的输出要用来预测 \(x_{t+1}\)，如果它能看到 \(s \gt t\) 的 token，训练时就等于偷看了答案。因为 \(e^{-\infty}=0\)，被掩掉的位置权重恰好为 0。实现时用一个很大的负数代替 \(-\infty\)，并先减去每行最大值防止 \(\exp\) 溢出，结果不变：\(\mathrm{softmax}(z) = \mathrm{softmax}(z - \max_j z_j)\)。</p>`,
+  "⑩": String.raw`
+    \[ O^{(h)} = A^{(h)} V^{(h)},\qquad o^{(h)}_t = \sum_{s \le t} A^{(h)}_{t,s}\, v^{(h)}_s \]
+    <p>每行 \(A_{t,s}\ge 0\) 且 \(\sum_s A_{t,s}=1\)，所以 \(o_t\) 是可见位置 value 向量的<b>凸组合</b>（加权平均）。注意力的本质就是"按相关性从其他位置搬运信息"。最后把各头拼接，再用 \(W_O\)（<code>c_proj</code>）把各头的信息混合起来：</p>
+    \[ \mathrm{MHA}(\hat X) = \big[\,O^{(1)} \,\|\, \cdots \,\|\, O^{(H)}\,\big]\, W_O + b_O,\qquad W_O \in \mathbb{R}^{d\times d} \]`,
+  "⑪": String.raw`
+    \[ U = X^{(\ell-1)} + \mathrm{MHA}\big(\mathrm{LN}_1(X^{(\ell-1)})\big) \]
+    <p>从反向传播看，残差连接的雅可比矩阵带一个恒等项：</p>
+    \[ \frac{\partial U}{\partial X^{(\ell-1)}} = I + \frac{\partial\, \mathrm{MHA}\big(\mathrm{LN}_1(X^{(\ell-1)})\big)}{\partial X^{(\ell-1)}} \]
+    <p>恒等项 \(I\) 让梯度可以不经衰减地直接穿过 12 层。从前向看，每个子层只是往残差流上"加一点增量"，而不是整体替换表示。</p>`,
+  "⑫": String.raw`
+    \[ \mathrm{FFN}(u) = \mathrm{GELU}(u W_{fc} + b_{fc})\, W_{proj} + b_{proj},\qquad W_{fc}\in\mathbb{R}^{d\times 4d},\ W_{proj}\in\mathbb{R}^{4d\times d} \]
+    <p>GELU 的精确定义是 \(x\) 乘以标准正态分布的累积分布函数 \(\Phi(x)\)；config 里的 <code>gelu_new</code> 用的是 tanh 近似：</p>
+    \[ \mathrm{GELU}(x) = x\,\Phi(x) \approx \tfrac{1}{2}\,x\Big(1 + \tanh\!\Big[\sqrt{2/\pi}\,\big(x + 0.044715\,x^3\big)\Big]\Big) \]
+    <p>与 ReLU 相比，它在 0 附近平滑，负数输入也有很小的输出。FFN 对每个 token 独立计算，不同位置之间不交换信息。可以把它理解为一个大的 key-value 记忆：\(W_{fc}\) 的 3072 列是"模式探测器"，\(W_{proj}\) 的 3072 行是探测到模式后写回残差流的内容。注意力负责在位置之间搬运信息，FFN 负责在每个位置上加工信息。</p>`,
+  "⑬": String.raw`
+    \[ X^{(\ell)} = U + \mathrm{FFN}\big(\mathrm{LN}_2(U)\big) \]
+    <p>把 ⑤~⑬ 合起来，一个块就是两组"Pre-LN、子层、残差"：</p>
+    \[ \begin{aligned} U &= X^{(\ell-1)} + \mathrm{MHA}\big(\mathrm{LN}_1(X^{(\ell-1)})\big) \\ X^{(\ell)} &= U + \mathrm{FFN}\big(\mathrm{LN}_2(U)\big) \end{aligned} \]
+    <p>每层参数量：注意力 \((3d^2+3d) + (d^2+d)\)，FFN \((4d^2+4d) + (4d^2+d)\)，两个 LN 共 \(4d\)，合计 \(12d^2 + 13d = 7{,}087{,}872\)。12 层约 85M，加上嵌入 \((V + 1024)\,d \approx 39.4\text{M}\) 和 <code>ln_f</code>，总计 124,439,808 个参数，即"GPT-2 124M"。每个 token 每层的矩阵乘约 \(2\times 12d^2 \approx 14.2\text{M}\) 次浮点运算。</p>`,
+  "⑭": String.raw`
+    \[ \tilde h_t = \mathrm{LN}_f\big(x^{(12)}_t\big) \]
+    <p>Pre-LN 结构里残差流本身从未被归一化，经过 24 次累加（每层两个子层）后，数值幅度会变大，各维尺度也不一致。投影到词表之前需要最后一次 LN，把它拉回与词嵌入可比较的尺度。原始 Transformer 的 Post-LN 结构每个子层之后都会归一化，因此不需要这一步。</p>`,
+  "⑮": String.raw`
+    \[ z_t = \tilde h_t\, W_{te}^{\top} \in \mathbb{R}^{V},\qquad z_{t,v} = \tilde h_t \cdot W_{te}[v] = \sum_{j=1}^{d} \tilde h_{t,j}\, W_{te}[v,j] \]
+    <p>每个词的 logit 就是隐状态和该词嵌入向量的点积：隐状态越"像"某个词的嵌入，这个词得分越高。输入端和输出端共用同一个矩阵（weight tying），省下 \(V\times d \approx 38.6\text{M}\) 个参数，约占全部参数的 31%。这也是整个模型里最大的一次矩阵乘：每个 token 需要 \(2dV \approx 77\text{M}\) 次浮点运算，比一整层 Transformer 块（约 14M）还多。</p>`,
+  "⑯": String.raw`
+    \[ p(x_{T+1}=v \mid x_{\le T}) = \frac{\exp(z_{T,v}/\tau)}{\sum_{u=0}^{V-1}\exp(z_{T,u}/\tau)} \]
+    <p>\(\tau\) 是温度：\(\tau\to 0\) 时退化为贪心 argmax，\(\tau\) 越大分布越平、输出越随机。常用解码策略：</p>
+    <ul>
+      <li><b>贪心</b>：\(\hat v = \arg\max_v z_{T,v}\)。softmax 是单调函数，不改变 argmax，所以可以跳过 softmax。</li>
+      <li><b>Top-k</b>：只保留概率最大的 \(k\) 个词，重新归一化后采样。</li>
+      <li><b>Top-p（nucleus）</b>：按概率从大到小累加，保留累计概率刚超过 \(p\) 的最小集合，再采样。</li>
+    </ul>
+    <p>训练时不采样，而是让每个位置都预测真实的下一个 token，最小化平均交叉熵：</p>
+    \[ \mathcal{L} = -\frac{1}{T-1}\sum_{t=1}^{T-1} \log p(x_{t+1} \mid x_{\le t}) \]`,
+  "⑰": String.raw`
+    <p>解码是编码的逆过程：id 反查 vocab 得到子词字符串，把每个字符映射回原始字节，拼接后按 UTF-8 解码：</p>
+    \[ \mathrm{text} = \mathrm{decode}_{\text{UTF-8}}\Big(\mathrm{bytes}\big(\mathrm{vocab}^{-1}[\mathrm{id}_1]\big) \,\|\, \cdots \,\|\, \mathrm{bytes}\big(\mathrm{vocab}^{-1}[\mathrm{id}_n]\big)\Big) \]
+    <p>因为是字节级 BPE，一个汉字（UTF-8 中占 3 字节）可能被拆成多个 token，单个 token 解码出来可能是不完整的字节序列。流式输出时要先缓存字节，凑成完整的 UTF-8 字符再显示。</p>`,
+  "⑱": String.raw`
+    \[ p(x_{T+1},\dots,x_{T+N}\mid x_{1:T}) = \prod_{n=1}^{N} p(x_{T+n} \mid x_{1:T+n-1}) \]
+    <p>每一步从上一步的分布中选出一个 token 接到输入后面，再求下一个条件分布。无缓存时，第 \(n\) 步要对长度 \(T_n = T+n-1\) 的整段序列做前向，计算量约为</p>
+    \[ \mathrm{FLOPs}_n \approx L\big(24\,T_n d^2 + 4\,T_n^2 d\big) \]
+    <p>第一项是线性层，第二项是 \(QK^\top\) 与 \(AV\)。其中绝大部分是在重复计算旧位置，而它们的结果上一步已经算过了。</p>`,
+  "⑲": String.raw`
+    <p>KV cache 成立的关键是一条性质：<b>在因果掩码下，位置 \(t\) 在任意一层的表示只依赖 \(x_{1:t}\)</b>。可以用归纳法证明：\(x^{(0)}_t\) 只依赖 \(x_t\) 和 \(t\)；若第 \(\ell-1\) 层每个位置 \(s\) 只依赖 \(x_{1:s}\)，那么 LN、线性层、FFN 都是逐位置运算，注意力只读取 \(s \le t\) 的位置，所以 \(x^{(\ell)}_t\) 也只依赖 \(x_{1:t}\)。于是（省略偏置）：</p>
+    \[ k^{(\ell,h)}_t = \mathrm{LN}_1\big(x^{(\ell-1)}_t\big)\,W_K^{(\ell,h)},\qquad v^{(\ell,h)}_t = \mathrm{LN}_1\big(x^{(\ell-1)}_t\big)\,W_V^{(\ell,h)} \]
+    <p>一旦算出，就不会因为后面追加 token 而改变，可以缓存。Prefill 阶段把整段提示词并行算一遍，同时存下每层的 K、V：</p>
+    \[ \mathcal{C}^{(\ell)} = \big(K^{(\ell)}_{1:T},\ V^{(\ell)}_{1:T}\big),\qquad K^{(\ell)}_{1:T},\, V^{(\ell)}_{1:T} \in\mathbb{R}^{H\times T\times d_h} \]`,
+  "⑳": String.raw`
+    <p>位置下标从 0 开始，所以第 \(T+1\) 个 token 的位置是 \(T\)：</p>
+    \[ x^{(0)}_{T+1} = W_{te}[\mathrm{id}_{T+1}] + W_{pe}[T] \]
+    \[ [\,q_{T+1}\,\|\,k_{T+1}\,\|\,v_{T+1}\,] = \mathrm{LN}_1\big(x^{(\ell-1)}_{T+1}\big)\,W_{attn} + b_{attn} \in \mathbb{R}^{1\times 3d} \]
+    <p>所有逐位置运算（嵌入、LN、c_attn、c_proj、FFN、lm_head）现在只处理 1 行。每个 decode 步线性层的计算量约为 \(2P\) 次浮点运算（\(P\) 为参数量，每个参数做一次乘加），与已有序列长度无关。</p>`,
+  "㉑": String.raw`
+    \[ K^{(\ell,h)}_{1:T+1} = \begin{bmatrix} K^{(\ell,h)}_{1:T} \\ k^{(\ell,h)}_{T+1} \end{bmatrix} \in \mathbb{R}^{(T+1)\times d_h},\qquad V^{(\ell,h)}_{1:T+1} = \begin{bmatrix} V^{(\ell,h)}_{1:T} \\ v^{(\ell,h)}_{T+1} \end{bmatrix} \]
+    <p>根据 ⑲ 的性质，这样拼出来的矩阵与"把 \(T+1\) 个 token 从头算一遍"得到的 \(K, V\) 完全相同。工程上一般预先分配最大长度的缓冲区，按下标写入，避免每步 <code>cat</code> 都重新分配内存。</p>`,
+  "㉒": String.raw`
+    \[ s_j = \frac{q_{T+1}\cdot k_j}{\sqrt{d_h}},\quad j = 1,\dots,T+1,\qquad a = \mathrm{softmax}(s) \in \mathbb{R}^{1\times(T+1)} \]
+    <p>这正是无缓存时完整分数矩阵 \(S \in \mathbb{R}^{(T+1)\times(T+1)}\) 的最后一行；而最后一行的掩码 \(M_{T+1,j}\) 对所有 \(j\le T+1\) 都是 0，所以不需要掩码。KV cache 是<b>精确</b>的等价变换，不是近似，最多只有浮点求和顺序带来的微小差异。每层分数的计算量从 \(2(T+1)^2 d\) 降到 \(2(T+1)d\)。</p>`,
+  "㉓": String.raw`
+    \[ o^{(h)}_{T+1} = \sum_{j=1}^{T+1} a^{(h)}_j\, v^{(h)}_j,\qquad \mathrm{attn\_out} = \big[\,o^{(1)}\,\|\,\cdots\,\|\,o^{(H)}\,\big]\, W_O + b_O \in \mathbb{R}^{1\times d} \]
+    <p>之后照常做残差、\(\mathrm{LN}_2\)、FFN、残差，得到 \(x^{(\ell)}_{T+1}\) 作为下一层输入；下一层同样读取它自己那一层的缓存。</p>`,
+  "㉔": String.raw`
+    \[ z = \mathrm{LN}_f\big(x^{(12)}_{T+1}\big)\, W_{te}^{\top} \in \mathbb{R}^{1\times V},\qquad \mathrm{id}_{T+2} = \arg\max_v z_v \]
+    <p>一个 decode 步的总计算量约为</p>
+    \[ \mathrm{FLOPs}_{\text{step}} \approx 2P + 4\,L\,(T+1)\,d \]
+    <p>对 GPT-2 small，\(2P \approx 249\text{M}\)，注意力部分在 \(T=1024\) 时约 \(4\times12\times1024\times768\approx 38\text{M}\)。也就是说，decode 每步要把约 0.5 GB（fp32）的权重完整读一遍，却只做很少的计算，所以 decode 阶段通常受<b>内存带宽</b>限制，而不是受算力限制。</p>`,
+  "㉕": String.raw`
+    \[ \mathrm{Mem}_{KV} = 2 \times L \times B \times T \times H \times d_h \times \mathrm{bytes} = 2 \times 12 \times 1 \times T \times 12 \times 64 \times 4 = 73{,}728\,T\ \ \text{bytes} \]
+    <p>\(T=1024\) 时约 72 MB（fp32），而权重约 500 MB。换成 LLaMA-2-7B（\(L=32,\ H=32,\ d_h=128\)，fp16），每个 token 需要 \(2\times32\times32\times128\times2\ \text{B} = 512\ \text{KB}\)；长度 4096、batch 16 时就是 32 GB，超过权重本身的约 13 GB。常见优化：</p>
+    <ul>
+      <li><b>MQA / GQA</b>：多个 query 头共享一组 K/V 头，公式中的 \(H\) 换成更小的 \(H_{kv}\)。</li>
+      <li><b>PagedAttention</b>：像操作系统分页一样按块分配缓存，减少显存碎片。</li>
+      <li><b>KV 量化</b>：缓存用 int8 / fp8 存储，\(\mathrm{bytes}\) 减半或更少。</li>
+    </ul>`,
+};
+
+const theoryHtml = (st) => {
+  const t = THEORY[[...st.title][0]];
+  return t ? `<div class="theory"><span class="tag">原理与公式</span>${t}</div>` : "";
+};
+
+const S = (n) => (n <= 1 ? 12 : Math.round(8 * Math.sqrt(n)));
+const textW = (s, px) => [...s].reduce((w, ch) => w + (ch.charCodeAt(0) > 255 ? px : px * 0.6), 0);
+
+function braceH(x0, x1, y) {
+  const m = (x0 + x1) / 2, r = Math.min(5, (x1 - x0) / 4);
+  return `M${x0} ${y} Q${x0} ${y - 5} ${x0 + r} ${y - 5} L${m - r} ${y - 5} Q${m} ${y - 5} ${m} ${y - 10} Q${m} ${y - 5} ${m + r} ${y - 5} L${x1 - r} ${y - 5} Q${x1} ${y - 5} ${x1} ${y}`;
+}
+function braceV(x, y0, y1) {
+  const m = (y0 + y1) / 2, r = Math.min(5, (y1 - y0) / 4);
+  return `M${x} ${y0} Q${x - 5} ${y0} ${x - 5} ${y0 + r} L${x - 5} ${m - r} Q${x - 5} ${m} ${x - 10} ${m} Q${x - 5} ${m} ${x - 5} ${m + r} L${x - 5} ${y1 - r} Q${x - 5} ${y1} ${x} ${y1}`;
+}
+
+function renderRow(items) {
+  const LW = 46, PT = 40, PB = 34, GAP = 12;
+  const H = Math.max(24, ...items.filter((i) => i.k === "m").map((i) => S(i.r)));
+  let x = 6;
+  const parts = [];
+  for (const it of items) {
+    if (it.k === "m") {
+      const w = S(it.c), h = S(it.r);
+      const showR = it.r > 1, showC = it.c > 1;
+      const lw = showR ? LW : 6;
+      const nameW = textW(it.name, 14);
+      const bx = x + lw + Math.max(0, (nameW - w) / 2);
+      const by = PT + (H - h) / 2;
+      const k = KIND[it.kind];
+      parts.push(`<rect x="${bx}" y="${by}" width="${w}" height="${h}" rx="2" fill="${k.fill}" stroke="${k.stroke}" stroke-width="1.8"/>`);
+      if (showC) {
+        const col = it.hc ? HL : "#444";
+        parts.push(`<path d="${braceH(bx, bx + w, by - 4)}" fill="none" stroke="${col}" stroke-width="1.3"/>`);
+        parts.push(`<text x="${bx + w / 2}" y="${by - 18}" text-anchor="middle" class="dim" fill="${col}">${it.cl ?? it.c}</text>`);
+      }
+      if (showR) {
+        const col = it.hr ? HL : "#444";
+        parts.push(`<path d="${braceV(bx - 4, by, by + h)}" fill="none" stroke="${col}" stroke-width="1.3"/>`);
+        parts.push(`<text x="${bx - 17}" y="${by + h / 2 + 5}" text-anchor="end" class="dim" fill="${col}">${it.rl ?? it.r}</text>`);
+      }
+      parts.push(`<text x="${bx + w / 2}" y="${by + h + 20}" text-anchor="middle" class="nm">${it.name}</text>`);
+      x = Math.max(bx + w, bx + w / 2 + nameW / 2) + GAP;
+    } else if (it.k === "o") {
+      const w = Math.max(28, textW(it.s, 18) + 14);
+      parts.push(`<text x="${x + w / 2}" y="${PT + H / 2 + 7}" text-anchor="middle" class="op">${it.s}</text>`);
+      x += w;
+    } else {
+      const w = Math.max(80, textW(it.s, 13) + 24);
+      const cy = PT + H / 2;
+      parts.push(`<path d="M${x + 6} ${cy - 2} H${x + w - 10} M${x + 6} ${cy + 2} H${x + w - 10} M${x + w - 18} ${cy - 7} L${x + w - 6} ${cy} L${x + w - 18} ${cy + 7}" fill="none" stroke="#333" stroke-width="1.5"/>`);
+      parts.push(`<text x="${x + w / 2}" y="${cy - 10}" text-anchor="middle" class="ar">${it.s}</text>`);
+      x += w + 4;
+    }
+  }
+  const W = x + 6, Ht = PT + H + PB;
+  return `<svg width="${W}" height="${Ht}" viewBox="0 0 ${W} ${Ht}" xmlns="http://www.w3.org/2000/svg">
+    <style>
+      text { font-family: "Comic Sans MS","Segoe Print","Kalam",cursive,sans-serif; fill: #222; }
+      .dim { font-size: 13px; } .nm { font-size: 14px; } .op { font-size: 20px; font-weight: 600; } .ar { font-size: 13px; }
+      .dim[fill="${HL}"] { font-weight: 700; }
+    </style>${parts.join("")}</svg>`;
+}
+
+const esc = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;");
+
+document.getElementById("legend").innerHTML = Object.values(KIND)
+  .map((k) => `<span><i style="border-color:${k.stroke};background:${k.fill}"></i>${k.name}</span>`).join("");
+
+document.getElementById("content").innerHTML = SECTIONS.map((sec) => `
+  <h2>${sec.title}</h2>
+  ${sec.steps.map((st) => `
+    <div class="card">
+      <h3>${st.title}</h3>
+      <div class="fig">${renderRow(st.items)}</div>
+      <pre>${esc(st.code)}</pre>
+      <p class="note">${esc(st.note)}</p>
+      ${theoryHtml(st)}
+    </div>`).join("")}
+`).join("") + `
+  <h2>七、有无 KV cache 对比（已有 T 个 token，生成第 T+1 个）</h2>
+  <div class="card">
+    <table>
+      <tr><th>项目</th><th>无 cache（每步全量前向）</th><th>有 cache（Decode）</th></tr>
+      <tr><td>模型输入</td><td>input_ids (1, T+1)</td><td>next_id (1, 1) + past_key_values</td></tr>
+      <tr><td>每层 qkv</td><td>(T+1, 2304)</td><td>(1, 2304)</td></tr>
+      <tr><td>每头 scores</td><td>(T+1, T+1)，需要因果 mask</td><td>(1, T+1)，不需要 mask</td></tr>
+      <tr><td>每层 K / V</td><td>每步重算 (H, T+1, dh)</td><td>缓存 (H, T, dh) ∥ 新算 (H, 1, dh)</td></tr>
+      <tr><td>MLP / lm_head 行数</td><td>T+1</td><td>1</td></tr>
+      <tr><td>生成 N 个 token 的注意力总计算</td><td>≈ Σ T² （平方增长）</td><td>≈ Σ T （线性增长）</td></tr>
+      <tr><td>额外显存</td><td>无</td><td>2 × 12 × 768 × T × 4 字节（fp32）</td></tr>
+    </table>
+    <p class="note">本质是用空间换时间：K、V 不随后续 token 改变，所以存起来；代价是缓存随序列长度线性增长。Prefill 阶段（⑲）计算密集，Decode 阶段（⑳~㉔）每步计算量小、主要瓶颈变成读取权重和缓存的内存带宽。</p>
+  </div>
+
+  <h2>八、张量形状速查（B=1, T=4, GPT-2 small）</h2>
+  <div class="card">
+    <table>
+      <tr><th>阶段</th><th>张量</th><th>形状</th><th>主要计算</th><th>safetensors 名称（示例）</th></tr>
+      <tr><td>输入</td><td>input_ids</td><td>(1, T)</td><td>BPE 查表</td><td>—</td></tr>
+      <tr><td>嵌入</td><td>x⁽⁰⁾</td><td>(T, d)</td><td>wte[id] + wpe[pos]</td><td>wte.weight, wpe.weight</td></tr>
+      <tr><td>注意力</td><td>qkv</td><td>(T, 3d)</td><td>x̂ @ W_attn</td><td>h.ℓ.attn.c_attn.*</td></tr>
+      <tr><td>注意力</td><td>scores</td><td>(H, T, T)</td><td>Q Kᵀ / √d_h</td><td>—</td></tr>
+      <tr><td>注意力</td><td>ctx</td><td>(H, T, d_h)</td><td>softmax(scores) @ V</td><td>h.ℓ.attn.c_proj.*</td></tr>
+      <tr><td>MLP</td><td>m</td><td>(T, 4d)</td><td>GELU(x @ W_fc)</td><td>h.ℓ.mlp.c_fc.*</td></tr>
+      <tr><td>块输出</td><td>x⁽ℓ⁾</td><td>(T, d)</td><td>残差 ×2，重复 12 层</td><td>h.0 … h.11</td></tr>
+      <tr><td>输出</td><td>logits</td><td>(T, V)</td><td>h̃ @ wte.T</td><td>wte（共享）</td></tr>
+      <tr><td>预测</td><td>next_id</td><td>标量</td><td>argmax(logits[-1])</td><td>—</td></tr>
+    </table>
+    <p class="note">记忆要点：序列维 T 在注意力里通过 T×T 分数矩阵交互；通道维 d 在线性层里作为矩阵乘的内维被消掉。与 MNIST 教程相同，<code>A @ B</code> 要求 A 的列数等于 B 的行数。</p>
+  </div>`;
+
+document.addEventListener("DOMContentLoaded", () => {
+  if (!window.renderMathInElement) return;
+  renderMathInElement(document.body, {
+    delimiters: [{ left: "\\[", right: "\\]", display: true }, { left: "\\(", right: "\\)", display: false }],
+    strict: false,
+  });
+});
+</script>
+</body>
+</html>
