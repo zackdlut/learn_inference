@@ -39,25 +39,50 @@ int g_num_threads = 0; // 0 表示还没初始化，取硬件并发数
 // 如果计算本身才几十微秒，那纯粹是赔本。真实引擎都有这个阈值判断。
 constexpr int64 kParallelMinWork = 1 << 20; // M*N*K 低于 100 万就串行
 
-#if INFER_HAS_AVX2
-// C 的 4×16 小块全程待在寄存器里，K 循环结束才写回内存一次。
-// 对比标量版每次内积都要读写一遍 C，这是最大的性能来源。
+// --- B 打包的分块尺寸（v4 用）------------------------------------------------
+// 每次取 B 的 kKC×kNC 一块（256×512 个 float = 512 KB，放在 L2 里），
+// 打包成若干条 16 列宽的竖条。一条竖条 kKC×16 = 16 KB，微内核沿 k 连续读它。
+// kNC 必须是 kNR 的倍数，否则最后一条补零的竖条会写出缓冲区。
+constexpr int64 kKC = 256;
+constexpr int64 kNC = 512;
+static_assert(kNC % kNR == 0);
 
-// C 的 4×16 小块全程待在寄存器里，K 循环结束才写回内存一次。
+#if INFER_HAS_AVX2
+// 把 B[0:kc, 0:nc]（行距 ldb）打包成竖条：第 s 列起的竖条第 k 行位于
+//   packed[s*kc + k*16 + 0..15]
+// 打包后微内核每次读 B 都是相邻的 64 字节，不再按行距 N 跳着读 ——
+// N=1024 时那种「行距恰好 4 KB、全落在同一个 L1 组」的冲突也就没了。
+// 不足 16 列的最后一条补 0，这样微内核不用分情况。
+void pack_b(const float *b, int64 ldb, int64 kc, int64 nc, float *packed)
+{
+    for (int64 s = 0; s < nc; s += kNR)
+    {
+        const int64 nr = std::min(kNR, nc - s);
+        for (int64 k = 0; k < kc; ++k)
+        {
+            float *dst = packed + s * kc + k * kNR;
+            std::copy_n(b + k * ldb + s, nr, dst);
+            std::fill(dst + nr, dst + kNR, 0.0F);
+        }
+    }
+}
+
+// C 的 4×16 小块全程待在寄存器里，kc 循环结束才写回内存一次。
 // 对比标量版每次内积都要读写一遍 C，这是最大的性能来源。
-void micro_kernel_4x16(const float *a, const float *b, float *c, int64 K, int64 lda, int64 ldb,
-                       int64 ldc)
+// accumulate=false 时直接覆盖 C；为 true 时加到 C 原有的值上（K 被切成多段时用）。
+void micro_kernel_4x16(const float *a, int64 lda, const float *pb, int64 kc, float *c, int64 ldc,
+                       bool accumulate)
 {
     __m256 c00 = _mm256_setzero_ps(), c01 = _mm256_setzero_ps();
     __m256 c10 = _mm256_setzero_ps(), c11 = _mm256_setzero_ps();
     __m256 c20 = _mm256_setzero_ps(), c21 = _mm256_setzero_ps();
     __m256 c30 = _mm256_setzero_ps(), c31 = _mm256_setzero_ps();
 
-    for (int64 k = 0; k < K; ++k)
+    for (int64 k = 0; k < kc; ++k)
     {
-        // B 的一行 16 个数，两次 256 位加载
-        const __m256 b0 = _mm256_loadu_ps(b + k * ldb);
-        const __m256 b1 = _mm256_loadu_ps(b + k * ldb + 8);
+        // 打包后竖条的一行 16 个数是连续的，两次 256 位加载
+        const __m256 b0 = _mm256_loadu_ps(pb + k * kNR);
+        const __m256 b1 = _mm256_loadu_ps(pb + k * kNR + 8);
 
         // broadcast：把 A 的一个标量复制到 8 个通道
         // fmadd(x, y, z) = x*y + z，乘加一条指令完成，还少一次舍入
@@ -78,6 +103,17 @@ void micro_kernel_4x16(const float *a, const float *b, float *c, int64 K, int64 
         c31 = _mm256_fmadd_ps(av, b1, c31);
     }
 
+    if (accumulate)
+    {
+        c00 = _mm256_add_ps(c00, _mm256_loadu_ps(c + 0 * ldc));
+        c01 = _mm256_add_ps(c01, _mm256_loadu_ps(c + 0 * ldc + 8));
+        c10 = _mm256_add_ps(c10, _mm256_loadu_ps(c + 1 * ldc));
+        c11 = _mm256_add_ps(c11, _mm256_loadu_ps(c + 1 * ldc + 8));
+        c20 = _mm256_add_ps(c20, _mm256_loadu_ps(c + 2 * ldc));
+        c21 = _mm256_add_ps(c21, _mm256_loadu_ps(c + 2 * ldc + 8));
+        c30 = _mm256_add_ps(c30, _mm256_loadu_ps(c + 3 * ldc));
+        c31 = _mm256_add_ps(c31, _mm256_loadu_ps(c + 3 * ldc + 8));
+    }
     _mm256_storeu_ps(c + 0 * ldc, c00);
     _mm256_storeu_ps(c + 0 * ldc + 8, c01);
     _mm256_storeu_ps(c + 1 * ldc, c10);
@@ -86,6 +122,31 @@ void micro_kernel_4x16(const float *a, const float *b, float *c, int64 K, int64 
     _mm256_storeu_ps(c + 2 * ldc + 8, c21);
     _mm256_storeu_ps(c + 3 * ldc, c30);
     _mm256_storeu_ps(c + 3 * ldc + 8, c31);
+}
+
+// 边角块（不足 4 行或不足 16 列）：把 A 补零到 4 行、结果先算进 4×16 的临时区，
+// 再只把有效的 mr×nr 部分写回 C。这样边角也走同一个微内核，不必另写标量版。
+void edge_tile(const float *a, int64 lda, const float *pb, int64 kc, float *c, int64 ldc,
+               int64 mr, int64 nr, bool accumulate)
+{
+    float a_pad[kMR * kKC] = {};
+    const float *pa = a;
+    if (mr < kMR)
+    {
+        for (int64 r = 0; r < mr; ++r)
+            std::copy_n(a + r * lda, kc, a_pad + r * kc);
+        pa = a_pad;
+        lda = kc;
+    }
+    float tmp[kMR * kNR];
+    micro_kernel_4x16(pa, lda, pb, kc, tmp, kNR, false);
+    for (int64 r = 0; r < mr; ++r)
+    {
+        for (int64 j = 0; j < nr; ++j)
+        {
+            c[r * ldc + j] = accumulate ? c[r * ldc + j] + tmp[r * kNR + j] : tmp[r * kNR + j];
+        }
+    }
 }
 
 // 把 __m256 里的 8 个 float 加成一个标量。
@@ -103,22 +164,6 @@ inline float hsum256(__m256 v)
 }
 
 #endif // INFER_HAS_AVX2
-
-// 标量兜底的小块计算，处理边角料（M/N 不是微内核尺寸整数倍的部分）
-void scalar_block(const float *a, const float *b, float *c, int64 m, int64 n, int64 K, int64 lda,
-                  int64 ldb, int64 ldc)
-{
-    for (int64 i = 0; i < m; ++i)
-    {
-        for (int64 j = 0; j < n; ++j)
-        {
-            float sum = 0.0F;
-            for (int64 k = 0; k < K; ++k)
-                sum += a[i * lda + k] * b[k * ldb + j];
-            c[i * ldc + j] = sum;
-        }
-    }
-}
 
 // 把一段行区间 [row_begin, row_end) 分给若干线程并行处理
 template <class F> void parallel_rows(int64 total_rows, int64 work, F &&fn)
@@ -225,25 +270,44 @@ void matmul_f32_avx2(std::span<const float> a, std::span<const float> b, std::sp
     const float *pb = b.data();
     float *pc = c.data();
 
-    const int64 m_main = M / kMR * kMR; // 能被微内核整除的部分
-    const int64 n_main = N / kNR * kNR;
-
-    for (int64 i = 0; i < m_main; i += kMR)
+    if (K == 0)
     {
-        for (int64 j = 0; j < n_main; j += kNR)
-        {
-            micro_kernel_4x16(pa + i * K, pb + j, pc + i * N + j, K, K, N, N);
-        }
-        // 右边剩下不足 16 列的边角
-        if (n_main < N)
-        {
-            scalar_block(pa + i * K, pb + n_main, pc + i * N + n_main, kMR, N - n_main, K, K, N, N);
-        }
+        std::ranges::fill(c.first(static_cast<std::size_t>(M * N)), 0.0F);
+        return;
     }
-    // 下面剩下不足 4 行的边角
-    if (m_main < M)
+
+    // GotoBLAS 式的三层循环：
+    //   jc：按 kNC 列切 B          ┐ 这两层决定打包哪一块 B
+    //   kc：按 kKC 行切 K          ┘ 打包一次，被 A 的所有行复用
+    //   i / s：4 行 A × 一条 16 列竖条，交给微内核
+    // i 在外、竖条 s 在内：A 的 4×kc 小块（4 KB）在 L1 里被所有竖条复用，
+    // 打包好的 B 块（512 KB）从 L2 顺序流过。
+    std::vector<float> packed(static_cast<std::size_t>(kKC * kNC));
+    for (int64 jc = 0; jc < N; jc += kNC)
     {
-        scalar_block(pa + m_main * K, pb, pc + m_main * N, M - m_main, N, K, K, N, N);
+        const int64 nc = std::min(kNC, N - jc);
+        for (int64 k0 = 0; k0 < K; k0 += kKC)
+        {
+            const int64 kc = std::min(kKC, K - k0);
+            const bool accumulate = k0 > 0; // 第一段覆盖 C，之后的段累加，省掉提前清零
+            pack_b(pb + k0 * N + jc, N, kc, nc, packed.data());
+
+            for (int64 i = 0; i < M; i += kMR)
+            {
+                const int64 mr = std::min(kMR, M - i);
+                const float *ai = pa + i * K + k0;
+                for (int64 s = 0; s < nc; s += kNR)
+                {
+                    const int64 nr = std::min(kNR, nc - s);
+                    const float *bs = packed.data() + s * kc;
+                    float *cij = pc + i * N + jc + s;
+                    if (mr == kMR && nr == kNR)
+                        micro_kernel_4x16(ai, K, bs, kc, cij, N, accumulate);
+                    else
+                        edge_tile(ai, K, bs, kc, cij, N, mr, nr, accumulate);
+                }
+            }
+        }
     }
 #else
     matmul_f32_tiled(a, b, c, M, N, K); // 没有 AVX2 就退回分块版

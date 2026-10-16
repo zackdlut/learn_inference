@@ -76,7 +76,9 @@ struct Shape3
 const std::vector<Shape3> kShapes = {
     {1, 1, 1},   {1, 17, 3},   {3, 5, 7},    {4, 16, 8},    {4, 16, 1},   {5, 17, 9},
     {8, 32, 16}, {7, 33, 13},  {16, 2, 64},  {64, 64, 64},  {65, 63, 66}, {130, 70, 129},
-    {2, 200, 5}, {200, 3, 17}, {33, 48, 100}};
+    {2, 200, 5}, {200, 3, 17}, {33, 48, 100},
+    // K > 256、N > 512：覆盖 avx2 版沿 K 分段累加、沿 N 分多块打包的路径
+    {5, 530, 300}, {13, 517, 513}};
 
 // 输出预填 NaN：既能发现「没写到的元素」，也能发现「忘了清零就累加」
 // 容差按 K 放宽：float 累加误差大致随 K 线性增长
@@ -387,6 +389,19 @@ TEST(matmul_nt_parallel_thread_counts)
         const float diff = max_abs_diff(c, expect);
         PRINT("threads={} max_abs_diff={:.3g}", nt, diff);
         CHECK(diff < 1e-4F);
+    }
+}
+
+TEST(matmul_k_zero_gives_zeros)
+{
+    // K=0 时 C 应全为 0：avx2 版的 K 分段循环一次都不执行，必须单独处理
+    const std::vector<float> empty;
+    for (const MatmulFn &fn : {MatmulFn(kernel::matmul_f32_tiled), MatmulFn(kernel::matmul_f32_avx2),
+                               MatmulFn(kernel::matmul_f32)})
+    {
+        std::vector<float> c(6, std::numeric_limits<float>::quiet_NaN());
+        fn(empty, empty, c, 2, 3, 0);
+        CHECK((c == std::vector<float>(6, 0.0F)));
     }
 }
 

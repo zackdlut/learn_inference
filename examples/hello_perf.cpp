@@ -90,7 +90,7 @@ void run_matmul_suite(int64 N)
         {"v1 朴素 i-j-k", "教科书写法", kernel::matmul_f32_ijk, 0, 1},
         {"v2 换循环顺序", "i-k-j，内层连续访问", kernel::matmul_f32_ikj, 1, 5},
         {"v3 循环分块", "B 块打包成连续内存，留在 L1", kernel::matmul_f32_tiled, 1, 5},
-        {"v4 AVX2+FMA", "4×16 微内核，累加器在寄存器", kernel::matmul_f32_avx2, 1, 7},
+        {"v4 AVX2+FMA", "B 打包 + 4×16 微内核，累加器在寄存器", kernel::matmul_f32_avx2, 1, 7},
         {"v5 多线程", parallel_note.c_str(), kernel::matmul_f32_parallel, 1, 9},
     };
     // 先用参考实现算出标准答案
