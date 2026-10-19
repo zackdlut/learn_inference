@@ -1,0 +1,527 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>GPT-2 Tokenizer 图解（byte-level BPE）</title>
+<style>
+  :root {
+    --paper: #fbfaf6; --ink: #222; --muted: #6b6b6b; --line: #e4e1d8;
+    --hand: "Comic Sans MS", "Segoe Print", "Kalam", "Xiaolai SC", cursive;
+    --mono: "JetBrains Mono", Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: #ecebe6; color: var(--ink); font-family: system-ui, "PingFang SC", "Microsoft YaHei", sans-serif; line-height: 1.55; }
+  main { max-width: 1100px; margin: 0 auto; padding: 24px 16px 64px; }
+  h1 { font-family: var(--hand); font-size: 1.65rem; margin: 0 0 8px; }
+  h2 { font-family: var(--hand); font-size: 1.28rem; margin: 34px 0 10px; padding-bottom: 4px; border-bottom: 2px dashed #bbb; }
+  h3 { font-family: var(--hand); font-size: 1.05rem; margin: 6px 0; }
+  .sub { color: var(--muted); margin: 0 0 18px; max-width: 56em; line-height: 1.65; }
+  .card { background: var(--paper); border: 1px solid var(--line); border-radius: 6px; padding: 14px 18px 12px; margin: 12px 0; box-shadow: 0 1px 3px rgba(0,0,0,.06); }
+  .fig { overflow-x: auto; margin: 8px 0; }
+  .fig svg { display: block; }
+  pre { font-family: var(--mono); font-size: 12.5px; background: #f1efe8; border-left: 3px solid #c9c3b3; padding: 8px 12px; margin: 8px 0; overflow-x: auto; }
+  code { font-family: var(--mono); font-size: 12.5px; }
+  table { border-collapse: collapse; font-size: 13px; width: 100%; margin-top: 8px; }
+  th, td { border: 1px solid var(--line); padding: 5px 10px; text-align: left; vertical-align: top; }
+  th { background: #f1efe8; }
+  .note { font-size: 13.5px; line-height: 1.7; color: #333; margin: 6px 0 0; }
+  a { color: #2f6fd6; }
+  .theory { margin-top: 10px; padding: 8px 14px; background: #f7f4fd; border-left: 3px solid #7c4ddb; border-radius: 4px; font-size: 13.5px; line-height: 1.75; }
+  .theory .tag { font-family: var(--hand); font-weight: 600; color: #7c4ddb; }
+  .theory p { margin: 4px 0; }
+  .theory ul { margin: 4px 0; padding-left: 1.3em; }
+  .theory .katex-display { margin: 6px 0; overflow-x: auto; overflow-y: hidden; padding: 2px 0; }
+  svg text { font-family: system-ui, "PingFang SC", "Microsoft YaHei", sans-serif; }
+  svg .mono { font-family: "JetBrains Mono", Consolas, monospace; }
+
+  /* chips */
+  .chip { display: inline-block; font-family: var(--mono); font-size: 13px; border: 1.5px solid #999; border-radius: 4px; padding: 1px 6px; margin: 2px 2px; background: #fff; white-space: pre; }
+  .chip small { font-size: 10px; color: #666; margin-left: 4px; }
+  .chip.hl { background: #dff4ea; border-color: #239a6a; border-width: 2.5px; font-weight: 700; }
+  .chip.id { background: #dcf3f6; border-color: #0f8b9c; }
+  .group { display: inline-block; border: 1.5px dashed; border-radius: 6px; padding: 2px 3px; margin: 3px 3px; }
+  .ws { color: #d23c3c; }
+
+  /* pipeline */
+  .stage { display: grid; grid-template-columns: 170px 1fr; gap: 10px; align-items: center; padding: 6px 0; }
+  .stage .lbl { font-size: 12.5px; text-align: right; color: #444; }
+  .stage .lbl b { display: block; font-family: var(--mono); font-size: 12px; color: #7c4ddb; }
+  .arrow { margin-left: 180px; color: #888; font-size: 18px; line-height: 1; }
+  .btns { display: flex; flex-wrap: wrap; gap: 6px; margin: 4px 0 8px; }
+  .btns button { font: 12.5px var(--mono); padding: 3px 10px; border: 1.5px solid #bbb; background: #fff; border-radius: 14px; cursor: pointer; }
+  .btns button.on { border-color: #7c4ddb; background: #ece4fb; color: #4b2a9a; font-weight: 600; }
+  .stat { font-size: 13px; color: #444; margin-top: 6px; }
+
+  /* ladder */
+  .rung { display: grid; grid-template-columns: 64px 250px 1fr; gap: 8px; align-items: center; border-bottom: 1px dotted #ddd; padding: 3px 0; }
+  .rung .k { font-family: var(--hand); color: #7c4ddb; font-weight: 600; }
+  .rung .rule { font: 12px var(--mono); color: #555; }
+  .rung .rule b { color: #d98a00; }
+
+  /* byte grid */
+  .bgrid { border-collapse: collapse; font-family: var(--mono); font-size: 12px; width: auto; }
+  .bgrid td, .bgrid th { width: 46px; height: 38px; text-align: center; vertical-align: middle; padding: 0; border: 1px solid #e4e1d8; }
+  .bgrid td { line-height: 1.1; }
+  .bgrid td small { display: block; font-size: 9px; color: #888; }
+  .bgrid td.keep { background: #e3edfc; }
+  .bgrid td.remap { background: #fbe3e3; }
+  .bgrid td.focus { outline: 2.5px solid #d98a00; outline-offset: -2px; }
+
+  /* decode grid */
+  .dgrid { display: grid; gap: 3px; font-family: var(--mono); font-size: 12px; margin: 8px 0; }
+  .dgrid .tok { text-align: center; border: 1.5px solid; border-radius: 4px; padding: 2px 0; }
+  .dgrid .byte { text-align: center; background: #fff; border: 1px solid #ccc; border-radius: 3px; padding: 2px 0; }
+  .dgrid .char { text-align: center; border: 1.5px solid #0f8b9c; background: #dcf3f6; border-radius: 4px; padding: 3px 0; font-size: 16px; }
+  .dgrid .rowlbl { font-size: 11.5px; color: #555; align-self: center; text-align: right; padding-right: 6px; font-family: system-ui, sans-serif; }
+</style>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" />
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
+</head>
+<body>
+<main>
+  <h1>Tokenizer 图解：GPT-2 的 byte-level BPE</h1>
+  <p class="sub">
+    对应本项目 <a href="../include/inference/tokenizer.hpp"><code>tokenizer.hpp</code></a> / <a href="../src/tokenizer.cpp"><code>tokenizer.cpp</code></a>，
+    词表文件由 <a href="../tools/convert_gpt2.py"><code>tools/convert_gpt2.py</code></a> 从 <code>data/gpt2/vocab.json</code>、<code>merges.txt</code> 转换而来。
+    页面里所有例子都是用与 <code>tokenizer.cpp</code> 相同的算法、在真实的 GPT-2 词表上跑出来的（"The capital of France is" 的结果与 <code>convert_gpt2.py</code> 中的参考 token 一致）。
+    图中 <span class="ws">␣</span> 表示空格，<span class="ws">↵</span> 表示换行。
+  </p>
+
+  <!-- ============================================================ -->
+  <h2>1. 总览：encode 的四步，decode 的三步</h2>
+  <div class="card">
+    <div class="btns" id="ex-btns"></div>
+    <div id="pipeline"></div>
+    <div class="stat" id="pipe-stat"></div>
+    <div class="theory"><span class="tag">原理</span>
+      <p>模型只认识整数，分词器负责文本和整数之间的双向翻译。把 encode 写成函数复合：</p>
+      \[ \mathrm{encode}(s) = \mathop{\Vert}_{c\,\in\,\mathrm{pre}(s)} \mathrm{lookup}\Big(\mathrm{bpe}\big(\mathrm{map}(\mathrm{bytes}(c))\big)\Big) \]
+      <p>其中 \(\mathrm{pre}\) 是预分词，\(\mathrm{map}\) 是字节到可见字符的映射，\(\mathrm{bpe}\) 在每个词块内部做合并，\(\mathrm{lookup}\) 查词表，\(\Vert\) 表示把各词块的结果按顺序拼接。decode 是逆过程，并且对任意 id 序列都成立：</p>
+      \[ \mathrm{decode}(\mathrm{encode}(s)) = s \]
+      <p>这个"无损往返"是 byte-level 设计带来的：最底层是 256 个字节，任何 UTF-8 文本都能被表示，也都能被还原。</p>
+    </div>
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>2. 从文件到内存：词表和合并规则长什么样</h2>
+  <div class="card">
+    <div class="fig">
+      <svg viewBox="0 0 980 420" width="980" height="420" xmlns="http://www.w3.org/2000/svg" font-size="12">
+        <defs><marker id="ar" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#555"/></marker></defs>
+        <!-- source files -->
+        <text x="20" y="22" font-weight="600" fill="#555">data/gpt2/（Hub 原始文件）</text>
+        <rect x="20" y="34" width="250" height="76" rx="6" fill="#fdf0d6" stroke="#d98a00" stroke-width="1.5"/>
+        <text x="145" y="54" text-anchor="middle" font-weight="600">vocab.json</text>
+        <text x="32" y="74" class="mono" font-size="11">{"!": 0, "\"": 1, …,</text>
+        <text x="32" y="90" class="mono" font-size="11"> "Ġthe": 262, …}</text>
+        <text x="32" y="104" font-size="10" fill="#555">50257 项 · 子词 → id</text>
+
+        <rect x="20" y="124" width="250" height="76" rx="6" fill="#fdf0d6" stroke="#d98a00" stroke-width="1.5"/>
+        <text x="145" y="144" text-anchor="middle" font-weight="600">merges.txt</text>
+        <text x="32" y="164" class="mono" font-size="11">#version: 0.2</text>
+        <text x="32" y="180" class="mono" font-size="11">Ġ t / Ġ a / h e / i n …</text>
+        <text x="32" y="194" font-size="10" fill="#555">50000 行 · 行号就是优先级</text>
+
+        <!-- converter -->
+        <rect x="300" y="90" width="150" height="48" rx="8" fill="#ececec" stroke="#777" stroke-width="1.5"/>
+        <text x="375" y="110" text-anchor="middle" font-weight="600">convert_gpt2.py</text>
+        <text x="375" y="127" text-anchor="middle" font-size="10" fill="#555">按 id 排序 · 定长头</text>
+        <path d="M270 72 H285 V104 H300" stroke="#555" stroke-width="1.5" fill="none" marker-end="url(#ar)"/>
+        <path d="M270 162 H285 V124 H300" stroke="#555" stroke-width="1.5" fill="none" marker-end="url(#ar)"/>
+
+        <!-- bin layouts -->
+        <text x="480" y="22" font-weight="600" fill="#555">二进制文件（小端）</text>
+        <g class="mono" font-size="11">
+          <rect x="480" y="34" width="60" height="34" fill="#e3edfc" stroke="#2f6fd6"/><text x="510" y="55" text-anchor="middle">GPTV</text>
+          <rect x="540" y="34" width="70" height="34" fill="#e3edfc" stroke="#2f6fd6"/><text x="575" y="55" text-anchor="middle">u32 N</text>
+          <rect x="610" y="34" width="60" height="34" fill="#fff" stroke="#999"/><text x="640" y="55" text-anchor="middle">u32 len</text>
+          <rect x="670" y="34" width="90" height="34" fill="#fff" stroke="#999"/><text x="715" y="55" text-anchor="middle">UTF-8 字节</text>
+          <rect x="760" y="34" width="60" height="34" fill="#fff" stroke="#999"/><text x="790" y="55" text-anchor="middle">u32 len</text>
+          <rect x="820" y="34" width="90" height="34" fill="#fff" stroke="#999"/><text x="865" y="55" text-anchor="middle">UTF-8 字节</text>
+          <text x="920" y="55">…</text>
+        </g>
+        <text x="610" y="84" font-size="10.5" fill="#555">第 0 个 token（id = 0）          第 1 个 token（id = 1）           共 N = 50257 条</text>
+        <text x="480" y="100" font-size="10.5" fill="#d23c3c">存的是映射后的字符串（如 "Ġthe"），不是原始字节</text>
+
+        <g class="mono" font-size="11">
+          <rect x="480" y="124" width="60" height="34" fill="#e3edfc" stroke="#2f6fd6"/><text x="510" y="145" text-anchor="middle">GPTM</text>
+          <rect x="540" y="124" width="70" height="34" fill="#e3edfc" stroke="#2f6fd6"/><text x="575" y="145" text-anchor="middle">u32 M</text>
+          <rect x="610" y="124" width="60" height="34" fill="#fff" stroke="#999"/><text x="640" y="145" text-anchor="middle">len a</text>
+          <rect x="670" y="124" width="50" height="34" fill="#fff" stroke="#999"/><text x="695" y="145" text-anchor="middle">a</text>
+          <rect x="720" y="124" width="60" height="34" fill="#fff" stroke="#999"/><text x="750" y="145" text-anchor="middle">len b</text>
+          <rect x="780" y="124" width="50" height="34" fill="#fff" stroke="#999"/><text x="805" y="145" text-anchor="middle">b</text>
+          <text x="840" y="145">…</text>
+        </g>
+        <text x="610" y="174" font-size="10.5" fill="#555">第 0 条规则（rank 0）：a = "Ġ", b = "t"          共 M = 50000 条</text>
+
+        <path d="M450 104 H465 V51 H480" stroke="#555" stroke-width="1.5" fill="none" marker-end="url(#ar)"/>
+        <path d="M450 124 H465 V141 H480" stroke="#555" stroke-width="1.5" fill="none" marker-end="url(#ar)"/>
+
+        <!-- in-memory -->
+        <text x="20" y="246" font-weight="600" fill="#555">Tokenizer::load() 之后的内存结构</text>
+        <rect x="20" y="258" width="300" height="130" rx="8" fill="#ece4fb" stroke="#7c4ddb" stroke-width="1.5"/>
+        <text x="170" y="278" text-anchor="middle" font-weight="600" class="mono">id_to_token_</text>
+        <text x="170" y="294" text-anchor="middle" font-size="10.5" fill="#555">vector&lt;string&gt;，下标就是 id（decode 用）</text>
+        <g class="mono" font-size="11">
+          <rect x="36" y="306" width="60" height="26" fill="#fff" stroke="#999"/><text x="66" y="323" text-anchor="middle">"!"</text>
+          <rect x="96" y="306" width="60" height="26" fill="#fff" stroke="#999"/><text x="126" y="323" text-anchor="middle">"\""</text>
+          <text x="166" y="323">…</text>
+          <rect x="186" y="306" width="70" height="26" fill="#fff" stroke="#999"/><text x="221" y="323" text-anchor="middle">"Ġthe"</text>
+          <text x="264" y="323">…</text>
+          <text x="66" y="346" text-anchor="middle" font-size="10" fill="#555">[0]</text>
+          <text x="126" y="346" text-anchor="middle" font-size="10" fill="#555">[1]</text>
+          <text x="221" y="346" text-anchor="middle" font-size="10" fill="#555">[262]</text>
+        </g>
+        <text x="36" y="374" font-size="10.5" fill="#555">按下标取，O(1)</text>
+
+        <rect x="340" y="258" width="300" height="130" rx="8" fill="#ece4fb" stroke="#7c4ddb" stroke-width="1.5"/>
+        <text x="490" y="278" text-anchor="middle" font-weight="600" class="mono">token_to_id_</text>
+        <text x="490" y="294" text-anchor="middle" font-size="10.5" fill="#555">unordered_map&lt;string,int&gt;（encode 最后一步）</text>
+        <g class="mono" font-size="11">
+          <text x="360" y="320">"Ġcapital" → 3139</text>
+          <text x="360" y="340">"ĠFrance"  → 4881</text>
+          <text x="360" y="360">"Ġ"        → 220</text>
+        </g>
+        <text x="360" y="380" font-size="10.5" fill="#555">哈希查找，平均 O(1)</text>
+
+        <rect x="660" y="258" width="300" height="130" rx="8" fill="#ece4fb" stroke="#7c4ddb" stroke-width="1.5"/>
+        <text x="810" y="278" text-anchor="middle" font-weight="600" class="mono">merge_rank_</text>
+        <text x="810" y="294" text-anchor="middle" font-size="10.5" fill="#555">key = a + '\x01' + b，value = 行号</text>
+        <g class="mono" font-size="11">
+          <text x="680" y="320">"Ġ\x01t"  → 0</text>
+          <text x="680" y="340">"h\x01e"  → 2</text>
+          <text x="680" y="360">"Ġc\x01ap" → 1195</text>
+        </g>
+        <text x="680" y="380" font-size="10.5" fill="#555">BPE 每轮对所有相邻对查一次</text>
+
+        <text x="170" y="252" text-anchor="middle" font-size="10.5" fill="#2f6fd6">← gpt2_vocab.bin</text>
+        <text x="490" y="252" text-anchor="middle" font-size="10.5" fill="#2f6fd6">← gpt2_vocab.bin</text>
+        <text x="810" y="252" text-anchor="middle" font-size="10.5" fill="#2f6fd6">← gpt2_merges.bin</text>
+        <text x="20" y="410" font-size="11.5" fill="#555">为什么转成 .bin：C++ 标准库没有 JSON 解析器；定长头 + [长度][字节] 的格式几十行就能读完，也不用处理 JSON 里的转义字符。</text>
+      </svg>
+    </div>
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>3. 第一步 pre_tokenize：先切成"词块"</h2>
+  <div class="card">
+    <table>
+      <tr><th>优先级</th><th>GPT-2 官方正则的分支</th><th><code>pre_tokenize</code> 里的对应逻辑</th><th>例子</th></tr>
+      <tr><td>1</td><td><code>'s|'t|'re|'ve|'m|'ll|'d</code></td><td>遇到 <code>'</code> 时比较 7 个后缀</td><td><code>I'm</code> → <span class="chip">I</span><span class="chip">'m</span></td></tr>
+      <tr><td>2</td><td><code> ?\p{L}+</code></td><td>可选 1 个前导空格 + 连续 <code>is_letter</code></td><td><span class="chip">␣learning</span></td></tr>
+      <tr><td>3</td><td><code> ?\p{N}+</code></td><td>可选 1 个前导空格 + 连续 <code>is_digit</code></td><td><span class="chip">␣3</span><span class="chip">14</span></td></tr>
+      <tr><td>4</td><td><code> ?[^\s\p{L}\p{N}]+</code></td><td>可选 1 个前导空格 + 连续"非空白、非字母、非数字"</td><td><span class="chip">!</span><span class="chip">␣=</span><span class="chip">.</span></td></tr>
+      <tr><td>5</td><td><code>\s+(?!\S)|\s+</code></td><td>连续空白；若后面还有非空白，把最后一个空格让给下一块</td><td><span class="chip">↵↵␣</span><span class="chip">␣y</span></td></tr>
+    </table>
+    <h3 style="margin-top:14px">每个例子切出来的词块</h3>
+    <div id="pretok-all"></div>
+    <div class="theory"><span class="tag">原理</span>
+      <p><b>为什么要先切块</b>：BPE 只在词块内部合并，合并永远不会跨越词块边界。这样 "dog." 和 "dog!" 里的 "dog" 会得到同一个 token，而不会学出 "dog." 这种把标点粘进单词的 token，词表的利用率更高。</p>
+      <p><b>为什么空格放在单词前面</b>：规则 2~4 都允许"一个可选的前导空格"，所以 GPT-2 的 token 大多是 <code>"Ġthe"</code>、<code>"Ġcapital"</code> 这种"空格 + 单词"的形式。句首的 "The" 没有前导空格，是另一个 token（464），而 " The" 是 383。</p>
+      <p><b>规则 5 的细节</b>：<code>"x = 3.14↵↵␣␣y"</code> 中的空白串 <code>↵↵␣␣</code> 后面跟着 <code>y</code>，正则 <code>\s+(?!\S)</code> 要求匹配结束后不能紧跟非空白，于是只吃掉 <code>↵↵␣</code>，把最后一个空格留给 <code>␣y</code>。<code>tokenizer.cpp</code> 里的 <code>--end</code> 就是在实现这个"让出一个空格"。</p>
+    </div>
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>4. 第二步 byte_encoder：256 个字节 → 256 个可见字符</h2>
+  <div class="card">
+    <p class="note" style="margin-top:0">
+      行是高 4 位，列是低 4 位。<span style="background:#e3edfc;padding:0 6px;border:1px solid #2f6fd6">蓝色</span> 188 个字节保持原码位（<code>!</code>~<code>~</code>、<code>0xA1</code>~<code>0xAC</code>、<code>0xAE</code>~<code>0xFF</code>）；
+      <span style="background:#fbe3e3;padding:0 6px;border:1px solid #d23c3c">红色</span> 68 个控制字符、空白和不可见字节，按顺序映射到 U+0100 起的码位（256…323）。
+      <span style="outline:2.5px solid #d98a00;padding:0 6px">橙框</span> 是"你"的 3 个字节和空格、换行。
+    </p>
+    <div class="fig"><table class="bgrid" id="bytegrid"></table></div>
+    <div class="fig">
+      <svg viewBox="0 0 960 150" width="960" height="150" xmlns="http://www.w3.org/2000/svg" font-size="12">
+        <defs><marker id="ar4" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#555"/></marker></defs>
+        <text x="20" y="40" font-size="22">你</text>
+        <path d="M50 32 H90" stroke="#555" stroke-width="1.5" marker-end="url(#ar4)"/>
+        <text x="56" y="24" font-size="10.5" fill="#555">UTF-8</text>
+        <g class="mono">
+          <rect x="95" y="14" width="56" height="30" fill="#fff" stroke="#999"/><text x="123" y="34" text-anchor="middle">E4</text>
+          <rect x="155" y="14" width="56" height="30" fill="#fff" stroke="#999"/><text x="183" y="34" text-anchor="middle">BD</text>
+          <rect x="215" y="14" width="56" height="30" fill="#fff" stroke="#999"/><text x="243" y="34" text-anchor="middle">A0</text>
+        </g>
+        <path d="M275 32 H325" stroke="#555" stroke-width="1.5" marker-end="url(#ar4)"/>
+        <text x="280" y="24" font-size="10.5" fill="#555">byte_encoder</text>
+        <g class="mono" font-size="15">
+          <rect x="330" y="10" width="56" height="38" fill="#e3edfc" stroke="#2f6fd6"/><text x="358" y="35" text-anchor="middle">ä</text>
+          <rect x="390" y="10" width="56" height="38" fill="#e3edfc" stroke="#2f6fd6"/><text x="418" y="35" text-anchor="middle">½</text>
+          <rect x="450" y="10" width="56" height="38" fill="#fbe3e3" stroke="#d23c3c"/><text x="478" y="35" text-anchor="middle">ł</text>
+        </g>
+        <text x="520" y="26" font-size="11" fill="#555">0xE4、0xBD 原样保留（U+00E4、U+00BD）；</text>
+        <text x="520" y="42" font-size="11" fill="#555">0xA0（不换行空格）被移到 U+0142</text>
+
+        <g class="mono">
+          <rect x="95" y="70" width="56" height="30" fill="#fff" stroke="#999"/><text x="123" y="90" text-anchor="middle">20</text>
+          <rect x="330" y="66" width="56" height="38" fill="#fbe3e3" stroke="#d23c3c"/><text x="358" y="91" text-anchor="middle" font-size="15">Ġ</text>
+          <rect x="95" y="110" width="56" height="30" fill="#fff" stroke="#999"/><text x="123" y="130" text-anchor="middle">0A</text>
+          <rect x="330" y="106" width="56" height="38" fill="#fbe3e3" stroke="#d23c3c"/><text x="358" y="131" text-anchor="middle" font-size="15">Ċ</text>
+        </g>
+        <text x="20" y="90" font-size="12">空格</text>
+        <text x="20" y="130" font-size="12">换行</text>
+        <path d="M155 85 H325" stroke="#555" stroke-width="1.5" marker-end="url(#ar4)"/>
+        <path d="M155 125 H325" stroke="#555" stroke-width="1.5" marker-end="url(#ar4)"/>
+        <text x="400" y="90" font-size="11" fill="#555">0x20 是第 33 个被移走的字节 → 256 + 32 = 288 = U+0120（Ġ）</text>
+        <text x="400" y="130" font-size="11" fill="#555">0x0A → 256 + 10 = 266 = U+010A（Ċ）</text>
+      </svg>
+    </div>
+    <div class="theory"><span class="tag">原理</span>
+      <p>映射后的字符再编码成 UTF-8 存进词表，所以需要每个字节都对应一个"能安全打印、能放进 JSON 的字符"。设保留集合为 \(K\)（\(|K| = 188\)），被移走的字节按从小到大的顺序编号为 \(j = 0, 1, \dots, 67\)：</p>
+      \[ \mathrm{map}(b) = \begin{cases} \mathrm{chr}(b), & b \in K \\ \mathrm{chr}(256 + j(b)), & b \notin K \end{cases} \qquad \text{码位范围 } [\,0x21,\ 0x143\,] \]
+      <p>最大码位 \(256 + 67 = 323 = \text{0x143}\)，UTF-8 下最多 2 字节，这正是 <code>make_byte_encoder</code> 只处理 1 字节和 2 字节两种情况的原因。映射是双射，<code>byte_decoder</code> 就是它的逆表。</p>
+      <p>顺带一提，词表的前 256 个 id 正好就是这 256 个字符：id 0~187 是保留字节（按字节值排序），188~255 是被移走的字节，所以空格 \(\to\) <code>Ġ</code> \(\to\) id \(188 + 32 = 220\)。</p>
+    </div>
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>5. 第三步 bpe：按优先级一步步合并</h2>
+  <div class="card">
+    <div class="btns" id="bpe-btns"></div>
+    <div id="ladder"></div>
+    <p class="note" id="ladder-note"></p>
+    <div class="theory"><span class="tag">原理与公式</span>
+      <p>每一轮在当前所有相邻对中，找 rank 最小（merges.txt 中最靠前）的那一对，把它在词块中<b>所有</b>的出现位置一起合并：</p>
+      \[ (a^*, b^*) = \arg\min_{(a,b)\,\in\,\mathrm{pairs}(w)} \mathrm{rank}(a, b), \qquad w \leftarrow w\big[\,a^*\, b^* \to a^*b^*\,\big] \]
+      <p>没有任何相邻对出现在 merges 里时停止。注意 encode 时看的是 <b>rank</b>（训练时被加入的先后），而不是在当前这个词里出现的次数。训练时规则是这样产生的：从 256 个字节出发，每次把语料中最常相邻出现的一对合并成新符号，重复 50000 次：</p>
+      \[ (a,b)^{(k)} = \arg\max_{(a,b)}\ \mathrm{count}^{(k)}(a,b),\qquad \mathrm{rank}\big((a,b)^{(k)}\big) = k \]
+      <p>encode 按 rank 从小到大重放这些合并，就能把新文本切成和训练时一致的 token。</p>
+      <p><b>复杂度</b>：<code>tokenizer.cpp</code> 每轮扫描所有相邻对（\(O(n)\) 次哈希查找），最多 \(n-1\) 轮，所以单个词块是 \(O(n^2)\)。词块通常只有几个到十几个字符，这样写最直观；tiktoken 等库用优先队列加链表把它降到 \(O(n\log n)\)。</p>
+    </div>
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>6. 第四步查词表：id 是怎么排的</h2>
+  <div class="card">
+    <div class="fig">
+      <svg viewBox="0 0 980 300" width="980" height="300" xmlns="http://www.w3.org/2000/svg" font-size="12">
+        <text x="20" y="22" font-weight="600">id 空间 0 … 50256（宽度不按比例）</text>
+        <rect x="20" y="34" width="120" height="44" fill="#e3edfc" stroke="#2f6fd6" stroke-width="1.5"/>
+        <text x="80" y="54" text-anchor="middle" font-weight="600">0 … 187</text>
+        <text x="80" y="70" text-anchor="middle" font-size="10.5">保留的 188 个字节</text>
+        <rect x="140" y="34" width="110" height="44" fill="#fbe3e3" stroke="#d23c3c" stroke-width="1.5"/>
+        <text x="195" y="54" text-anchor="middle" font-weight="600">188 … 255</text>
+        <text x="195" y="70" text-anchor="middle" font-size="10.5">被移走的 68 个</text>
+        <rect x="250" y="34" width="600" height="44" fill="#dff4ea" stroke="#239a6a" stroke-width="1.5"/>
+        <text x="550" y="54" text-anchor="middle" font-weight="600">256 … 50255：第 k 条合并规则的结果，id = 256 + k</text>
+        <text x="550" y="70" text-anchor="middle" font-size="10.5">50000 个（"Ġt" = 256，"Ġa" = 257，"he" = 258，…，"Ġthe" = 262）</text>
+        <rect x="850" y="34" width="110" height="44" fill="#ececec" stroke="#777" stroke-width="1.5"/>
+        <text x="905" y="54" text-anchor="middle" font-weight="600">50256</text>
+        <text x="905" y="70" text-anchor="middle" font-size="10.5">&lt;|endoftext|&gt;</text>
+
+        <!-- histogram -->
+        <text x="20" y="118" font-weight="600">每个 token 解码后的字节数分布</text>
+        <g font-size="10.5">
+          <!-- scale: 7305 -> 130px -->
+          <rect x="60"  y="270.4" width="56" height="4.6"   fill="#e3edfc" stroke="#2f6fd6"/><text x="88"  y="266" text-anchor="middle">256</text><text x="88"  y="292" text-anchor="middle">1</text>
+          <rect x="140" y="240.9" width="56" height="34.1"  fill="#dff4ea" stroke="#239a6a"/><text x="168" y="236" text-anchor="middle">1916</text><text x="168" y="292" text-anchor="middle">2</text>
+          <rect x="220" y="182.2" width="56" height="92.8"  fill="#dff4ea" stroke="#239a6a"/><text x="248" y="178" text-anchor="middle">5212</text><text x="248" y="292" text-anchor="middle">3</text>
+          <rect x="300" y="146.5" width="56" height="128.5" fill="#dff4ea" stroke="#239a6a"/><text x="328" y="142" text-anchor="middle">7221</text><text x="328" y="292" text-anchor="middle">4</text>
+          <rect x="380" y="145.0" width="56" height="130.0" fill="#dff4ea" stroke="#239a6a"/><text x="408" y="141" text-anchor="middle">7305</text><text x="408" y="292" text-anchor="middle">5</text>
+          <rect x="460" y="160.1" width="56" height="114.9" fill="#dff4ea" stroke="#239a6a"/><text x="488" y="156" text-anchor="middle">6456</text><text x="488" y="292" text-anchor="middle">6</text>
+          <rect x="540" y="169.8" width="56" height="105.2" fill="#dff4ea" stroke="#239a6a"/><text x="568" y="165" text-anchor="middle">5912</text><text x="568" y="292" text-anchor="middle">7</text>
+          <rect x="620" y="185.0" width="56" height="90.0"  fill="#dff4ea" stroke="#239a6a"/><text x="648" y="181" text-anchor="middle">5055</text><text x="648" y="292" text-anchor="middle">8</text>
+          <rect x="700" y="206.6" width="56" height="68.4"  fill="#dff4ea" stroke="#239a6a"/><text x="728" y="202" text-anchor="middle">3845</text><text x="728" y="292" text-anchor="middle">9</text>
+          <rect x="780" y="149.0" width="56" height="126.0" fill="#fdf0d6" stroke="#d98a00"/><text x="808" y="145" text-anchor="middle">7078</text><text x="808" y="292" text-anchor="middle">≥ 10</text>
+        </g>
+        <line x1="50" y1="275" x2="850" y2="275" stroke="#999"/>
+        <text x="860" y="279" font-size="10.5" fill="#555">字节数</text>
+        <text x="860" y="160" font-size="10.5" fill="#555">最长的 token</text>
+        <text x="860" y="174" font-size="10.5" fill="#555">有 128 个字节</text>
+      </svg>
+    </div>
+    <div class="theory"><span class="tag">原理</span>
+      <p>用 <code>data/gpt2</code> 里的两个文件逐条核对，50000 条合并规则全部满足</p>
+      \[ \mathrm{id}(a^{(k)} b^{(k)}) = 256 + k \]
+      <p>也就是说 GPT-2 的词表就是"256 个字节 + 按合并顺序依次追加的新符号 + 1 个特殊 token"，id 越小的 token 在训练语料里越早、越频繁地出现，因此 \(V = 256 + 50000 + 1 = 50257\)。这也说明 <code>merge_rank_</code> 里存的行号可以直接由 id 推出：\(\mathrm{rank} = \mathrm{id} - 256\)。</p>
+      <p>byte-level BPE 里 <code>token_to_id_</code> 查找失败是不可能的：BPE 的每个结果要么是单字节字符（一定在前 256 个 id 里），要么是某条规则的合并结果（一定在词表里）。所以 <code>encode</code> 在查不到时直接抛异常，提示词表文件不匹配。</p>
+    </div>
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>7. decode：id → 字节 → 文字（token 边界 ≠ 字符边界）</h2>
+  <div class="card">
+    <p class="note" style="margin-top:0">以 <code>"你好，世界"</code> 为例：11 个 token、15 个字节、5 个汉字和标点。第一行是 token（id 和映射后的字符串），第二行是 <code>decode_one</code> 还原出的原始字节，第三行是按 UTF-8 拼出来的字符。</p>
+    <div class="fig" id="decode-fig"></div>
+    <div class="theory"><span class="tag">原理</span>
+      <p><code>decode_one(id)</code> 把 token 字符串逐字符查 <code>byte_decoder</code> 还原成字节，<code>decode</code> 再把所有字节按顺序拼起来：</p>
+      \[ \mathrm{decode}(\mathrm{id}_1, \dots, \mathrm{id}_n) = \mathrm{bytes}(\mathrm{id}_1) \,\Vert\, \cdots \,\Vert\, \mathrm{bytes}(\mathrm{id}_n) \]
+      <p>上图里 id 19526 只有 <code>E4 BD</code> 两个字节，"你"的第 3 个字节 <code>A0</code> 在下一个 token 254 里。所以单独打印 <code>decode_one(19526)</code> 会得到不完整的 UTF-8，终端上显示成乱码。逐 token 流式输出时，要先把字节放进缓冲区，凑满一个完整的 UTF-8 字符（首字节 <code>0xE?</code> 表示共 3 字节，<code>0xF?</code> 表示 4 字节）再输出。</p>
+      <p>GPT-2 训练语料以英文为主，汉字的字节对很少被合并，所以中文平均每个字要 2 个左右的 token，而英文一个常见单词通常就是 1 个 token。</p>
+    </div>
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>8. 实现细节与注意事项</h2>
+  <div class="card">
+    <h3>① 预分词的近似：切分不同，最终 id 基本相同</h3>
+    <p class="note">官方正则用 Unicode 属性 <code>\p{L}</code>，<code>tokenizer.cpp</code> 把所有 ≥ 0x80 的字节都当作字母。对中文全角标点，两者切分不同：</p>
+    <div id="approx"></div>
+    <p class="note">
+      但把两种切分分别交给同一个 BPE，比较上面所有例子以及约 2.3 万个"英文/中文单词 + 常见 Unicode 符号"的组合，最终 id 序列<b>完全一致</b>。
+      原因是合并规则是在官方切分出的词块内部学出来的：官方规则下"字母"和"全角标点"永远不在同一个词块里，所以它们之间的相邻对没有对应的合并规则，即使 C++ 把它们放进同一块，BPE 也不会把它们合并。
+      这个近似不保证在所有输入上都和官方一致（例如非 ASCII 的空白字符），但对常见文本足够。
+    </p>
+
+    <h3 style="margin-top:14px">② 合并"所有"出现位置</h3>
+    <p class="note">第 5 节的 <code>hahaha</code>：rank 737 的规则 <code>a + h</code> 在词里出现了 2 次，一轮里要同时合并。如果每轮只合并第一处，下一轮会先命中别的规则，结果就和官方对不上，<code>tokenizer.cpp</code> 的注释里也专门强调了这一点。</p>
+
+    <h3 style="margin-top:14px">③ 为什么 merge_rank_ 的键要加 '\x01'</h3>
+    <p class="note">
+      直接拼接会产生歧义："a" + "bc" 和 "ab" + "c" 拼出来都是 "abc"。中间插一个分隔符就能区分。选 <code>\x01</code> 是安全的：
+      映射后的字符要么是 0x21~0x7E 的单字节，要么是首字节为 0xC2~0xC5 的 2 字节 UTF-8，任何 token 字符串里都不可能出现字节 0x01。
+    </p>
+
+    <h3 style="margin-top:14px">④ 特殊 token 不会被 encode 识别</h3>
+    <p class="note" id="special-note"></p>
+  </div>
+
+  <p class="sub" style="margin-top:28px">
+    相关页面：<a href="huggingface_model_files.html">模型文件格式</a> · <a href="gpt2_inference_flow.html">逐步推理与张量形状</a> · <a href="gpt2_compute_graph.html">模型文件 → 计算图</a>
+  </p>
+</main>
+
+<script>
+const DATA = {"examples":{"The capital of France is":[{"raw":"The","mapped":"The","steps":[{"parts":["T","h","e"],"pair":null,"rank":null},{"parts":["T","he"],"pair":["h","e"],"rank":2,"hits":1},{"parts":["The"],"pair":["T","he"],"rank":208,"hits":1}],"pieces":["The"],"ids":[464]},{"raw":" capital","mapped":"Ġcapital","steps":[{"parts":["Ġ","c","a","p","i","t","a","l"],"pair":null,"rank":null},{"parts":["Ġc","a","p","i","t","a","l"],"pair":["Ġ","c"],"rank":13,"hits":1},{"parts":["Ġc","a","p","it","a","l"],"pair":["i","t"],"rank":14,"hits":1},{"parts":["Ġc","a","p","it","al"],"pair":["a","l"],"rank":26,"hits":1},{"parts":["Ġc","ap","it","al"],"pair":["a","p"],"rank":243,"hits":1},{"parts":["Ġc","ap","ital"],"pair":["it","al"],"rank":1031,"hits":1},{"parts":["Ġcap","ital"],"pair":["Ġc","ap"],"rank":1195,"hits":1},{"parts":["Ġcapital"],"pair":["Ġcap","ital"],"rank":2883,"hits":1}],"pieces":["Ġcapital"],"ids":[3139]},{"raw":" of","mapped":"Ġof","steps":[{"parts":["Ġ","o","f"],"pair":null,"rank":null},{"parts":["Ġo","f"],"pair":["Ġ","o"],"rank":11,"hits":1},{"parts":["Ġof"],"pair":["Ġo","f"],"rank":30,"hits":1}],"pieces":["Ġof"],"ids":[286]},{"raw":" France","mapped":"ĠFrance","steps":[{"parts":["Ġ","F","r","a","n","c","e"],"pair":null,"rank":null},{"parts":["Ġ","F","r","an","c","e"],"pair":["a","n"],"rank":16,"hits":1},{"parts":["Ġ","F","r","an","ce"],"pair":["c","e"],"rank":88,"hits":1},{"parts":["ĠF","r","an","ce"],"pair":["Ġ","F"],"rank":120,"hits":1},{"parts":["ĠF","r","ance"],"pair":["an","ce"],"rank":334,"hits":1},{"parts":["ĠFr","ance"],"pair":["ĠF","r"],"rank":1049,"hits":1},{"parts":["ĠFrance"],"pair":["ĠFr","ance"],"rank":4625,"hits":1}],"pieces":["ĠFrance"],"ids":[4881]},{"raw":" is","mapped":"Ġis","steps":[{"parts":["Ġ","i","s"],"pair":null,"rank":null},{"parts":["Ġ","is"],"pair":["i","s"],"rank":15,"hits":1},{"parts":["Ġis"],"pair":["Ġ","is"],"rank":62,"hits":1}],"pieces":["Ġis"],"ids":[318]}],"Hello world! I'm learning.":[{"raw":"Hello","mapped":"Hello","steps":[{"parts":["H","e","l","l","o"],"pair":null,"rank":null},{"parts":["H","e","ll","o"],"pair":["l","l"],"rank":41,"hits":1},{"parts":["H","ell","o"],"pair":["e","ll"],"rank":439,"hits":1},{"parts":["H","ello"],"pair":["ell","o"],"rank":10853,"hits":1},{"parts":["Hello"],"pair":["H","ello"],"rank":15240,"hits":1}],"pieces":["Hello"],"ids":[15496]},{"raw":" world","mapped":"Ġworld","steps":[{"parts":["Ġ","w","o","r","l","d"],"pair":null,"rank":null},{"parts":["Ġw","o","r","l","d"],"pair":["Ġ","w"],"rank":10,"hits":1},{"parts":["Ġw","or","l","d"],"pair":["o","r"],"rank":17,"hits":1},{"parts":["Ġw","or","ld"],"pair":["l","d"],"rank":79,"hits":1},{"parts":["Ġwor","ld"],"pair":["Ġw","or"],"rank":220,"hits":1},{"parts":["Ġworld"],"pair":["Ġwor","ld"],"rank":739,"hits":1}],"pieces":["Ġworld"],"ids":[995]},{"raw":"!","mapped":"!","steps":[{"parts":["!"],"pair":null,"rank":null}],"pieces":["!"],"ids":[0]},{"raw":" I","mapped":"ĠI","steps":[{"parts":["Ġ","I"],"pair":null,"rank":null},{"parts":["ĠI"],"pair":["Ġ","I"],"rank":58,"hits":1}],"pieces":["ĠI"],"ids":[314]},{"raw":"'m","mapped":"'m","steps":[{"parts":["'","m"],"pair":null,"rank":null},{"parts":["'m"],"pair":["'","m"],"rank":845,"hits":1}],"pieces":["'m"],"ids":[1101]},{"raw":" learning","mapped":"Ġlearning","steps":[{"parts":["Ġ","l","e","a","r","n","i","n","g"],"pair":null,"rank":null},{"parts":["Ġ","l","e","a","r","n","in","g"],"pair":["i","n"],"rank":3,"hits":1},{"parts":["Ġ","l","e","a","r","n","ing"],"pair":["in","g"],"rank":22,"hits":1},{"parts":["Ġ","l","e","ar","n","ing"],"pair":["a","r"],"rank":27,"hits":1},{"parts":["Ġ","le","ar","n","ing"],"pair":["l","e"],"rank":37,"hits":1},{"parts":["Ġle","ar","n","ing"],"pair":["Ġ","le"],"rank":187,"hits":1},{"parts":["Ġle","ar","ning"],"pair":["n","ing"],"rank":512,"hits":1},{"parts":["Ġle","arning"],"pair":["ar","ning"],"rank":3972,"hits":1},{"parts":["Ġlearning"],"pair":["Ġle","arning"],"rank":4417,"hits":1}],"pieces":["Ġlearning"],"ids":[4673]},{"raw":".","mapped":".","steps":[{"parts":["."],"pair":null,"rank":null}],"pieces":["."],"ids":[13]}],"lowest newer":[{"raw":"lowest","mapped":"lowest","steps":[{"parts":["l","o","w","e","s","t"],"pair":null,"rank":null},{"parts":["l","o","w","es","t"],"pair":["e","s"],"rank":18,"hits":1},{"parts":["l","ow","es","t"],"pair":["o","w"],"rank":66,"hits":1},{"parts":["l","ow","est"],"pair":["es","t"],"rank":139,"hits":1},{"parts":["low","est"],"pair":["l","ow"],"rank":9063,"hits":1}],"pieces":["low","est"],"ids":[9319,395]},{"raw":" newer","mapped":"Ġnewer","steps":[{"parts":["Ġ","n","e","w","e","r"],"pair":null,"rank":null},{"parts":["Ġ","n","e","w","er"],"pair":["e","r"],"rank":7,"hits":1},{"parts":["Ġn","e","w","er"],"pair":["Ġ","n"],"rank":43,"hits":1},{"parts":["Ġn","ew","er"],"pair":["e","w"],"rank":157,"hits":1},{"parts":["Ġnew","er"],"pair":["Ġn","ew"],"rank":393,"hits":1},{"parts":["Ġnewer"],"pair":["Ġnew","er"],"rank":14808,"hits":1}],"pieces":["Ġnewer"],"ids":[15064]}],"你好，世界":[{"raw":"你好，世界","mapped":"ä½łå¥½ï¼Įä¸ĸçķĮ","steps":[{"parts":["ä","½","ł","å","¥","½","ï","¼","Į","ä","¸","ĸ","ç","ķ","Į"],"pair":null,"rank":null},{"parts":["ä","½","ł","å","¥","½","ï","¼","Į","ä¸","ĸ","ç","ķ","Į"],"pair":["ä","¸"],"rank":10054,"hits":1},{"parts":["ä½","ł","å","¥","½","ï","¼","Į","ä¸","ĸ","ç","ķ","Į"],"pair":["ä","½"],"rank":19270,"hits":1},{"parts":["ä½","ł","å¥","½","ï","¼","Į","ä¸","ĸ","ç","ķ","Į"],"pair":["å","¥"],"rank":24745,"hits":1},{"parts":["ä½","ł","å¥","½","ï","¼","Į","ä¸","ĸ","çķ","Į"],"pair":["ç","ķ"],"rank":45655,"hits":1}],"pieces":["ä½","ł","å¥","½","ï","¼","Į","ä¸","ĸ","çķ","Į"],"ids":[19526,254,25001,121,171,120,234,10310,244,45911,234]}],"x = 3.14\n\n  y":[{"raw":"x","mapped":"x","steps":[{"parts":["x"],"pair":null,"rank":null}],"pieces":["x"],"ids":[87]},{"raw":" =","mapped":"Ġ=","steps":[{"parts":["Ġ","="],"pair":null,"rank":null},{"parts":["Ġ="],"pair":["Ġ","="],"rank":540,"hits":1}],"pieces":["Ġ="],"ids":[796]},{"raw":" 3","mapped":"Ġ3","steps":[{"parts":["Ġ","3"],"pair":null,"rank":null},{"parts":["Ġ3"],"pair":["Ġ","3"],"rank":257,"hits":1}],"pieces":["Ġ3"],"ids":[513]},{"raw":".","mapped":".","steps":[{"parts":["."],"pair":null,"rank":null}],"pieces":["."],"ids":[13]},{"raw":"14","mapped":"14","steps":[{"parts":["1","4"],"pair":null,"rank":null},{"parts":["14"],"pair":["1","4"],"rank":1159,"hits":1}],"pieces":["14"],"ids":[1415]},{"raw":"\n\n ","mapped":"ĊĊĠ","steps":[{"parts":["Ċ","Ċ","Ġ"],"pair":null,"rank":null},{"parts":["ĊĊ","Ġ"],"pair":["Ċ","Ċ"],"rank":372,"hits":1}],"pieces":["ĊĊ","Ġ"],"ids":[628,220]},{"raw":" y","mapped":"Ġy","steps":[{"parts":["Ġ","y"],"pair":null,"rank":null},{"parts":["Ġy"],"pair":["Ġ","y"],"rank":75,"hits":1}],"pieces":["Ġy"],"ids":[331]}]},"multi":{"raw":"hahaha","steps":[{"parts":["h","a","h","a","h","a"],"pair":null,"rank":null},{"parts":["h","ah","ah","a"],"pair":["a","h"],"rank":737,"hits":2},{"parts":["h","ah","aha"],"pair":["ah","a"],"rank":11980,"hits":1}],"pieces":["h","ah","aha"],"ids":[71,993,12236]},"special":{"chunks":["<|","endoftext","|>"],"ids":[27,91,437,1659,5239,91,29]}};
+
+const PALETTE = [
+  ["#2f6fd6", "#e3edfc"], ["#d98a00", "#fdf0d6"], ["#239a6a", "#dff4ea"], ["#7c4ddb", "#ece4fb"],
+  ["#d23c3c", "#fbe3e3"], ["#0f8b9c", "#dcf3f6"], ["#8a6d3b", "#f3ead8"],
+];
+const esc = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+const vis = (s) => esc(s).replace(/ /g, '<span class="ws">␣</span>').replace(/\n/g, '<span class="ws">↵</span>');
+const chip = (inner, color, cls = "") =>
+  `<span class="chip ${cls}" style="${color ? `border-color:${color[0]};background:${color[1]}` : ""}">${inner}</span>`;
+
+// byte_encoder / byte_decoder（与 tokenizer.cpp 的 make_byte_encoder 相同）
+const KEEP = new Set();
+for (let b = 0x21; b <= 0x7e; b++) KEEP.add(b);
+for (let b = 0xa1; b <= 0xac; b++) KEEP.add(b);
+for (let b = 0xae; b <= 0xff; b++) KEEP.add(b);
+const BENC = [], BDEC = new Map();
+{ let extra = 0; for (let b = 0; b < 256; b++) { const cp = KEEP.has(b) ? b : 256 + extra++; BENC[b] = String.fromCodePoint(cp); BDEC.set(BENC[b], b); } }
+const tokBytes = (tok) => [...tok].map((c) => BDEC.get(c));
+const hex = (b) => b.toString(16).toUpperCase().padStart(2, "0");
+
+// ---- 1. pipeline ----
+const EXAMPLES = Object.keys(DATA.examples);
+function renderPipeline(ex) {
+  const chunks = DATA.examples[ex];
+  const col = (i) => PALETTE[i % PALETTE.length];
+  const row = (lbl, fn, html) => `<div class="stage"><div class="lbl">${lbl}${fn ? `<b>${fn}</b>` : ""}</div><div>${html}</div></div>`;
+  const arrow = '<div class="arrow">⬇</div>';
+  const nbytes = new TextEncoder().encode(ex).length;
+  const nTok = chunks.reduce((s, c) => s + c.ids.length, 0);
+  document.getElementById("pipeline").innerHTML =
+    row("原始文本", "std::string_view", chip(vis(ex))) + arrow +
+    row("① 预分词", "pre_tokenize()", chunks.map((c, i) => chip(vis(c.raw), col(i))).join("")) + arrow +
+    row("② 字节映射", "byte_encoder()", chunks.map((c, i) => chip(esc(c.mapped), col(i))).join("")) + arrow +
+    row("③ 词块内合并", "bpe()", chunks.map((c, i) => `<span class="group" style="border-color:${col(i)[0]}">${c.pieces.map((p) => chip(esc(p), col(i))).join("")}</span>`).join("")) + arrow +
+    row("④ 查词表", "token_to_id_", chunks.map((c, i) => `<span class="group" style="border-color:${col(i)[0]}">${c.ids.map((id) => chip(String(id), null, "id")).join("")}</span>`).join("")) +
+    `<div class="arrow">⬆</div>` +
+    row("decode", "id_to_token_ → byte_decoder → 拼接字节", `<span style="font-size:13px;color:#444">把每个 id 变回映射字符串、再变回原始字节，按顺序拼接就得到原文</span>`);
+  document.getElementById("pipe-stat").innerHTML =
+    `${[...ex].length} 个字符 · ${nbytes} 个 UTF-8 字节 · ${chunks.length} 个词块 · <b>${nTok} 个 token</b>（平均每个 token ${(nbytes / nTok).toFixed(2)} 字节）`;
+  document.querySelectorAll("#ex-btns button").forEach((b) => b.classList.toggle("on", b.dataset.ex === ex));
+}
+document.getElementById("ex-btns").innerHTML = EXAMPLES.map((e) => `<button data-ex="${esc(e)}">${vis(e)}</button>`).join("");
+document.querySelectorAll("#ex-btns button").forEach((b) => (b.onclick = () => renderPipeline(b.dataset.ex)));
+renderPipeline(EXAMPLES[0]);
+
+// ---- 3. pretokenize all ----
+document.getElementById("pretok-all").innerHTML = EXAMPLES.map((ex) =>
+  `<div style="margin:4px 0"><code style="display:inline-block;min-width:260px">${vis(ex)}</code> → ${DATA.examples[ex].map((c, i) => chip(vis(c.raw), PALETTE[i % PALETTE.length])).join("")}</div>`
+).join("");
+
+// ---- 4. byte grid ----
+{
+  const focus = new Set([0xe4, 0xbd, 0xa0, 0x20, 0x0a]);
+  let h = "<tr><th></th>" + [...Array(16).keys()].map((c) => `<th>_${c.toString(16).toUpperCase()}</th>`).join("") + "</tr>";
+  for (let r = 0; r < 16; r++) {
+    h += `<tr><th>${r.toString(16).toUpperCase()}_</th>`;
+    for (let c = 0; c < 16; c++) {
+      const b = r * 16 + c, keep = KEEP.has(b);
+      h += `<td class="${keep ? "keep" : "remap"}${focus.has(b) ? " focus" : ""}" title="0x${hex(b)} → U+${BENC[b].codePointAt(0).toString(16).toUpperCase().padStart(4, "0")}">${esc(BENC[b])}<small>${hex(b)}</small></td>`;
+    }
+    h += "</tr>";
+  }
+  document.getElementById("bytegrid").innerHTML = h;
+}
+
+// ---- 5. BPE ladder ----
+const LADDERS = [];
+for (const ex of EXAMPLES) for (const c of DATA.examples[ex]) if (c.steps.length > 3) LADDERS.push(c);
+LADDERS.push({ ...DATA.multi, mapped: DATA.multi.steps[0].parts.join("") });
+const pick = [" learning", " France", "lowest", "hahaha", "你好，世界"];
+const ladderList = pick.map((r) => LADDERS.find((c) => c.raw === r)).filter(Boolean);
+const LADDER_NOTES = {
+  " learning": "8 轮合并后整个词块变成 1 个 token（id 4673）。前几轮用的都是 rank 很小的高频规则（i+n、in+g、a+r），越往后 rank 越大、合并出的片段越长。",
+  " France": "大写开头的词同样能合并成 1 个 token（id 4881）。注意 Ġ 和 F 在第 3 轮才合并，因为 rank 120 的 Ġ+F 比 a+n（16）、c+e（88）靠后。",
+  "lowest": "最后停在 low + est 两个 token：词表里没有 \"low\" + \"est\" 这条规则，所以不再合并。BPE 的结果不一定是一个完整单词。",
+  "hahaha": "第 1 轮的规则 a + h（rank 737）在词里出现 2 次，同时合并。最终是 h + ah + aha 三个 token。",
+  "你好，世界": "整个字符串在 C++ 预分词下是一个词块（见第 8 节）。15 个字节字符只合并了 4 次，剩下 11 个 token，很多 token 只是一个汉字的一部分字节。",
+};
+function renderLadder(i) {
+  const c = ladderList[i];
+  let h = "";
+  c.steps.forEach((s, k) => {
+    const merged = s.pair ? s.pair.join("") : null;
+    const rule = s.pair ? `规则 <b>#${s.rank}</b>：${esc(s.pair[0])} + ${esc(s.pair[1])}${s.hits > 1 ? `（命中 ${s.hits} 处）` : ""}` : "初始：逐字符拆开";
+    h += `<div class="rung"><div class="k">${k === 0 ? "开始" : "第 " + k + " 轮"}</div><div class="rule">${rule}</div><div>${s.parts.map((p) => chip(esc(p), null, p === merged ? "hl" : "")).join("")}</div></div>`;
+  });
+  h += `<div class="rung"><div class="k">结果</div><div class="rule">没有可用规则，停止 → 查词表</div><div>${c.pieces.map((p, j) => chip(`${esc(p)}<small>${c.ids[j]}</small>`, null, "id")).join("")}</div></div>`;
+  document.getElementById("ladder").innerHTML = h;
+  document.getElementById("ladder-note").textContent = LADDER_NOTES[c.raw] || "";
+  document.querySelectorAll("#bpe-btns button").forEach((b, j) => b.classList.toggle("on", j === i));
+}
+document.getElementById("bpe-btns").innerHTML = ladderList.map((c) => `<button>${vis(c.raw)}</button>`).join("");
+document.querySelectorAll("#bpe-btns button").forEach((b, j) => (b.onclick = () => renderLadder(j)));
+renderLadder(0);
+
+// ---- 7. decode figure ----
+{
+  const c = DATA.examples["你好，世界"];
+  const pieces = c.flatMap((x) => x.pieces), ids = c.flatMap((x) => x.ids);
+  const bytes = pieces.flatMap(tokBytes);
+  const n = bytes.length;
+  let cells = `<div class="rowlbl" style="grid-row:1">token</div><div class="rowlbl" style="grid-row:2">字节</div><div class="rowlbl" style="grid-row:3">字符</div>`;
+  let col = 2;
+  pieces.forEach((p, i) => {
+    const k = tokBytes(p).length, [s, f] = PALETTE[i % PALETTE.length];
+    cells += `<div class="tok" style="grid-row:1;grid-column:${col} / span ${k};border-color:${s};background:${f}">${ids[i]}<br>${esc(p)}</div>`;
+    col += k;
+  });
+  bytes.forEach((b, i) => (cells += `<div class="byte" style="grid-row:2;grid-column:${i + 2}">${hex(b)}</div>`));
+  let i = 0;
+  while (i < n) {
+    const b = bytes[i], len = b < 0x80 ? 1 : b < 0xe0 ? 2 : b < 0xf0 ? 3 : 4;
+    const ch = new TextDecoder().decode(new Uint8Array(bytes.slice(i, i + len)));
+    cells += `<div class="char" style="grid-row:3;grid-column:${i + 2} / span ${len}">${esc(ch)}</div>`;
+    i += len;
+  }
+  document.getElementById("decode-fig").innerHTML =
+    `<div class="dgrid" style="grid-template-columns:60px repeat(${n}, 52px)">${cells}</div>`;
+}
+
+// ---- 8. approx + special ----
+document.getElementById("approx").innerHTML =
+  `<div style="margin:6px 0">官方规则（<code>\\p{L}</code>）：${["你好", "，", "世界"].map((s, i) => chip(s, PALETTE[i])).join("")}
+   &nbsp;&nbsp; tokenizer.cpp：${chip("你好，世界", PALETTE[3])}
+   &nbsp;&nbsp; 两者最终 id 都是 ${chip(DATA.examples["你好，世界"].flatMap((x) => x.ids).join(", "), null, "id")}</div>`;
+document.getElementById("special-note").innerHTML =
+  `<code>&lt;|endoftext|&gt;</code> 在词表里是 id 50256，但 <code>encode("&lt;|endoftext|&gt;")</code> 会把它当普通文本，切成
+   ${DATA.special.chunks.map((s, i) => chip(esc(s), PALETTE[i])).join("")}，得到 ${chip(DATA.special.ids.join(", "), null, "id")} 共 ${DATA.special.ids.length} 个 token。
+   需要文档分隔符时，应在 id 序列里直接插入 50256，而不是把这串字符写进文本。反过来，<code>decode_one(50256)</code> 会输出字面字符串 <code>&lt;|endoftext|&gt;</code>，因为它的每个字符都是普通的保留字节。`;
+
+document.addEventListener("DOMContentLoaded", () => {
+  if (!window.renderMathInElement) return;
+  renderMathInElement(document.body, {
+    delimiters: [{ left: "\\[", right: "\\]", display: true }, { left: "\\(", right: "\\)", display: false }],
+    strict: false,
+  });
+});
+</script>
+</body>
+</html>

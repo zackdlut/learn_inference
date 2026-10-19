@@ -126,8 +126,6 @@ Tensor layernorm(const Tensor &x, const Tensor &w, const Tensor &b, float eps)
         fail(std::format("layernorm: weight/bias 长度应为 {}，实际是 {} 和 {}", cols, w.numel(),
                          b.numel()));
     }
-    check_same_shape(x, w, "layernorm");
-    check_same_shape(x, b, "layernorm");
     const Tensor cx = as_contiguous(x);
     const Tensor cw = as_contiguous(w);
     const Tensor cb = as_contiguous(b);
@@ -226,6 +224,100 @@ Tensor linear(const Tensor &x, const Tensor &w, const Tensor &bias)
             ov[static_cast<std::size_t>(r * N + j)] += bv[static_cast<std::size_t>(j)];
         }
     }
+    return out;
+}
+
+Tensor affine(const Tensor &x, const Tensor &w, const Tensor &bias)
+{
+    if (x.ndim() != 2 || w.ndim() != 2)
+    {
+        fail(std::format("affine: 需要两个二维张量，拿到 {} 和 {}", shape_str(x.shape()),
+                         shape_str(w.shape())));
+    }
+    const int64 M = x.dim(0), K = x.dim(1), N = w.dim(1);
+    if (w.dim(0) != K)
+    {
+        fail(std::format("affine: x 的特征数是 {}，但权重 {} 期望输入特征数是 {}", K,
+                         shape_str(w.shape()), w.dim(0)));
+    }
+    if (bias.numel() != N)
+    {
+        fail(std::format("affine: bias 长度应为 {}，实际是 {}", N, bias.numel()));
+    }
+    const Tensor cx = as_contiguous(x);
+    const Tensor cw = as_contiguous(w);
+    const Tensor cb = as_contiguous(bias);
+    Tensor out = Tensor::zeros({M, N});
+    kernel::matmul_f32(cx.data(), cw.data(), out.data(), M, N, K);
+
+    std::span<const float> bv = cb.data();
+    std::span<float> ov = out.data();
+    for (int64 r = 0; r < M; ++r)
+    {
+        for (int64 j = 0; j < N; ++j)
+        {
+            ov[static_cast<std::size_t>(r * N + j)] += bv[static_cast<std::size_t>(j)];
+        }
+    }
+    return out;
+}
+
+// ---------------------------------------------------------------------------
+// Transformer
+// ---------------------------------------------------------------------------
+
+Tensor embedding(const Tensor &table, std::span<const int> ids)
+{
+    if (table.ndim() != 2)
+    {
+        fail(std::format("embedding: 词表必须是二维，拿到 {}", shape_str(table.shape())));
+    }
+    const int64 n_vocab = table.dim(0), C = table.dim(1);
+    const Tensor ct = as_contiguous(table);
+    std::span<const float> tv = ct.data();
+
+    Tensor out = Tensor::zeros({static_cast<int64>(ids.size()), C});
+    std::span<float> ov = out.data();
+    for (std::size_t i = 0; i < ids.size(); ++i)
+    {
+        const int id = ids[i];
+        if (id < 0 || id >= n_vocab)
+        {
+            fail(std::format("embedding: token id {} 越界，词表只有 {} 项", id, n_vocab));
+        }
+        std::copy_n(tv.begin() + static_cast<std::ptrdiff_t>(id) * C, C,
+                    ov.begin() + static_cast<std::ptrdiff_t>(i) * C);
+    }
+    return out;
+}
+
+Tensor attention(const Tensor &q, const Tensor &k, const Tensor &v, int n_head, int q_offset)
+{
+    if (q.ndim() != 2 || k.ndim() != 2 || v.ndim() != 2)
+    {
+        fail("attention: q/k/v 都必须是二维 (T, n_head*head_size)");
+    }
+    if (k.shape() != v.shape())
+    {
+        fail(std::format("attention: k 和 v 形状必须一致，拿到 {} 和 {}", shape_str(k.shape()),
+                         shape_str(v.shape())));
+    }
+    const int64 C = q.dim(1);
+    if (C != k.dim(1))
+    {
+        fail(std::format("attention: q 的通道数 {} 和 k 的 {} 对不上", C, k.dim(1)));
+    }
+    if (n_head <= 0 || C % n_head != 0)
+    {
+        fail(std::format("attention: 通道数 {} 无法被 {} 个头整除", C, n_head));
+    }
+
+    const Tensor cq = as_contiguous(q);
+    const Tensor ck = as_contiguous(k);
+    const Tensor cv = as_contiguous(v);
+    Tensor out = Tensor::zeros(q.shape());
+    kernel::attention_f32(cq.data(), ck.data(), cv.data(), out.data(), q.dim(0), k.dim(0), n_head,
+                          C / n_head, q_offset);
     return out;
 }
 

@@ -48,7 +48,8 @@
     对应本仓库 <a href="../data/gpt2/"><code>data/gpt2/</code></a>（GPT-2 small）。
     为便于画图，固定 <code>B = 1</code>（单条序列）、<code>T = 4</code>（4 个 token）、隐藏维 <code>d = 768</code>、头数 <code>H = 12</code>、每头 <code>d<sub>h</sub> = 64</code>、词表 <code>V = 50257</code>；完整模型堆叠 <code>12</code> 个相同结构的块。
     方块大小按 √维度 缩放。<span class="red">红色维度</span> 为矩阵乘中被求和消掉的内维。
-    相关文件说明见 <a href="huggingface_model_files.html">huggingface_model_files.html</a>。
+    相关文件说明见 <a href="huggingface_model_files.html">huggingface_model_files.html</a>；
+    这些运算如何组织成本项目的计算图见 <a href="gpt2_compute_graph.html">gpt2_compute_graph.html</a>。
   </p>
   <div class="legend" id="legend"></div>
   <div id="content"></div>

@@ -39,6 +39,26 @@ namespace inference::ops
 [[nodiscard]] Tensor linear(const Tensor &x, const Tensor &w);
 [[nodiscard]] Tensor linear(const Tensor &x, const Tensor &w, const Tensor &bias);
 
+// 仿射变换：y = x @ W + bias，注意 W **没有**转置
+//   x:    (M, in)
+//   w:    (in, out)   ← HuggingFace 的 GPT-2 用 Conv1D，权重就是这个布局
+//   bias: (out,)
+//
+// 和上面的 linear 只差一个转置，但加载 GPT-2 权重时必须用对，
+// 否则形状能对上（768×768 是方阵！）却算出一堆垃圾 —— 这是最难查的一类 bug。
+[[nodiscard]] Tensor affine(const Tensor &x, const Tensor &w, const Tensor &bias);
+
+// --- 阶段 6：Transformer ----------------------------------------------------
+
+// 词嵌入查表：table 是 (n_vocab, C)，返回 (T, C)。
+// 它其实就是 one-hot 向量乘矩阵，但没人真那么算 —— 直接按行拷贝快几千倍。
+[[nodiscard]] Tensor embedding(const Tensor &table, std::span<const int> ids);
+
+// 多头因果注意力。q/k/v 形状 (T*, n_head*head_size)，返回和 q 同形。
+// q_offset 是 q 第一行的绝对位置，用 KV-Cache 增量解码时不为 0。
+[[nodiscard]] Tensor attention(const Tensor &q, const Tensor &k, const Tensor &v, int n_head,
+                               int q_offset = 0);
+
 // --- 杂项 -----------------------------------------------------------------
 // 返回最大值所在的下标。分类模型最后一步就靠它把概率变成类别。
 [[nodiscard]] int64 argmax(const Tensor &x);

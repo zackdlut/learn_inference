@@ -65,6 +65,27 @@ void matmul_f32_avx2(std::span<const float> a, std::span<const float> b, std::sp
 void matmul_f32_parallel(std::span<const float> a, std::span<const float> b, std::span<float> c,
                          int64 M, int64 N, int64 K);
 
+// --- 阶段 6：Transformer 需要的算子 ------------------------------------------
+// 多头因果注意力。这一个函数同时覆盖两种场景，差别只在参数上：
+//
+//   prefill（一次处理整个 prompt）：Tq = T, Tk = T, q_offset = 0
+//   decode （每次处理一个新词）  ：Tq = 1, Tk = 已缓存长度, q_offset = Tk-1
+//
+// 布局都是 [T, n_head * head_size]，同一个位置的所有头挨着放。
+//
+//   q 的第 i 行 ─┐
+//                ├─→ 和 k 的第 0..(q_offset+i) 行做点积 → 分数
+//   k 的各行  ───┘         │ softmax
+//                          ▼
+//   v 的各行  ──────→ 按分数加权求和 → out 的第 i 行
+//
+// causal（因果）的意思是第 i 个位置只能看到自己和前面的位置。
+// 没有这个限制，模型预测下一个词时就能偷看答案了。
+
+void attention_f32(std::span<const float> q, std::span<const float> k, std::span<const float> v,
+                   std::span<float> out, int64 Tq, int64 Tk, int64 n_head, int64 head_size,
+                   int64 q_offset);
+
 // 运行期查询本次构建是否带 AVX2（-march=native 关掉时会回退到标量版）
 bool has_avx2_support() noexcept;
 // 多线程用几个线程。默认取硬件并发数，设成 1 就等于串行。

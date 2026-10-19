@@ -1,0 +1,773 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>GPT-2 模型文件 → 计算图（图形解释）</title>
+<style>
+  :root {
+    --paper: #fbfaf6; --ink: #222; --muted: #6b6b6b; --line: #e4e1d8;
+    --hand: "Comic Sans MS", "Segoe Print", "Kalam", "Xiaolai SC", cursive;
+    --mono: "JetBrains Mono", Consolas, monospace;
+    --in: #e3edfc; --in-s: #2f6fd6;
+    --wt: #fdf0d6; --wt-s: #d98a00;
+    --op: #ece4fb; --op-s: #7c4ddb;
+    --val: #dff4ea; --val-s: #239a6a;
+    --out: #dcf3f6; --out-s: #0f8b9c;
+    --ext: #ececec; --ext-s: #777;
+    --new: #fbe3e3; --new-s: #d23c3c;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: #ecebe6; color: var(--ink); font-family: system-ui, "PingFang SC", "Microsoft YaHei", sans-serif; line-height: 1.55; }
+  main { max-width: 1100px; margin: 0 auto; padding: 24px 16px 64px; }
+  h1 { font-family: var(--hand); font-size: 1.65rem; margin: 0 0 8px; }
+  h2 { font-family: var(--hand); font-size: 1.28rem; margin: 34px 0 10px; padding-bottom: 4px; border-bottom: 2px dashed #bbb; }
+  .sub { color: var(--muted); margin: 0 0 18px; max-width: 56em; line-height: 1.65; }
+  .card { background: var(--paper); border: 1px solid var(--line); border-radius: 6px; padding: 14px 18px 12px; margin: 12px 0; box-shadow: 0 1px 3px rgba(0,0,0,.06); }
+  .fig { overflow-x: auto; margin: 8px 0; }
+  .fig svg { display: block; }
+  pre { font-family: var(--mono); font-size: 12.5px; background: #f1efe8; border-left: 3px solid #c9c3b3; padding: 8px 12px; margin: 8px 0; overflow-x: auto; line-height: 1.5; }
+  code { font-family: var(--mono); font-size: 12.5px; }
+  table { border-collapse: collapse; font-size: 13px; width: 100%; margin-top: 8px; }
+  th, td { border: 1px solid var(--line); padding: 5px 10px; text-align: left; vertical-align: top; }
+  th { background: #f1efe8; }
+  .note { font-size: 13.5px; line-height: 1.7; color: #333; margin: 6px 0 0; }
+  .legend { display: flex; flex-wrap: wrap; gap: 14px; font-size: 13px; margin: 6px 0 4px; }
+  .legend span { display: inline-flex; align-items: center; gap: 6px; }
+  .legend i { width: 20px; height: 12px; border: 1.5px solid; border-radius: 2px; display: inline-block; }
+  a { color: #2f6fd6; }
+  .ok { color: #239a6a; font-weight: 600; }
+  .no { color: #d23c3c; font-weight: 600; }
+  .theory { margin-top: 10px; padding: 8px 14px; background: #f7f4fd; border-left: 3px solid #7c4ddb; border-radius: 4px; font-size: 13.5px; line-height: 1.75; }
+  .theory .tag { font-family: var(--hand); font-weight: 600; color: #7c4ddb; }
+  .theory p { margin: 4px 0; }
+  .theory ul { margin: 4px 0; padding-left: 1.3em; }
+  .theory .katex-display { margin: 6px 0; overflow-x: auto; overflow-y: hidden; padding: 2px 0; }
+  svg text { font-family: system-ui, "PingFang SC", "Microsoft YaHei", sans-serif; }
+  svg .mono { font-family: "JetBrains Mono", Consolas, monospace; }
+</style>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" />
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
+</head>
+<body>
+<main>
+  <h1>GPT-2 模型文件如何变成计算图</h1>
+  <p class="sub">
+    前两页讲了 <a href="huggingface_model_files.html">模型文件里有什么</a> 和 <a href="gpt2_inference_flow.html">每一步怎么算</a>。
+    这一页讲中间那一步：把 <code>data/gpt2/</code> 里的文件"翻译"成本项目的
+    <a href="../include/inference/graph.hpp"><code>inference::Graph</code></a>，再交给 <code>Executor</code> 执行。
+    下文用 <code>T</code> 表示序列长度（batch 固定为 1），<code>d = 768</code>。
+  </p>
+
+  <div class="legend">
+    <span><i style="background:var(--in);border-color:var(--in-s)"></i> 输入 Value（Kind::Input）</span>
+    <span><i style="background:var(--wt);border-color:var(--wt-s)"></i> 权重 Value（Kind::Weight）</span>
+    <span><i style="background:var(--op);border-color:var(--op-s)"></i> 算子 Node（已注册）</span>
+    <span><i style="background:var(--new);border-color:var(--new-s);border-style:dashed"></i> 算子 Node（需新增）</span>
+    <span><i style="background:var(--val);border-color:var(--val-s)"></i> 中间 Value（Kind::Intermediate）</span>
+    <span><i style="background:var(--out);border-color:var(--out-s)"></i> 图输出</span>
+    <span><i style="background:var(--ext);border-color:var(--ext-s)"></i> 图外处理</span>
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>1. 四个文件分别变成图里的什么</h2>
+  <div class="card">
+    <div class="fig">
+      <svg viewBox="0 0 960 380" width="960" height="380" xmlns="http://www.w3.org/2000/svg" font-size="12">
+        <defs>
+          <marker id="ar" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#555"/></marker>
+        </defs>
+        <!-- files -->
+        <text x="20" y="22" font-weight="600" fill="#555">data/gpt2/</text>
+        <rect x="20" y="36" width="200" height="56" rx="6" fill="#e3edfc" stroke="#2f6fd6" stroke-width="1.5"/>
+        <text x="120" y="60" text-anchor="middle" font-weight="600">config.json</text>
+        <text x="120" y="78" text-anchor="middle" fill="#555" font-size="11">n_layer · n_head · eps …</text>
+
+        <rect x="20" y="120" width="200" height="66" rx="6" fill="#dff4ea" stroke="#239a6a" stroke-width="1.5"/>
+        <text x="120" y="146" text-anchor="middle" font-weight="600">model.safetensors</text>
+        <text x="120" y="164" text-anchor="middle" fill="#555" font-size="11">160 个具名张量</text>
+
+        <rect x="20" y="276" width="200" height="56" rx="6" fill="#fdf0d6" stroke="#d98a00" stroke-width="1.5"/>
+        <text x="120" y="300" text-anchor="middle" font-weight="600">vocab.json + merges.txt</text>
+        <text x="120" y="318" text-anchor="middle" fill="#555" font-size="11">BPE 分词规则</text>
+
+        <!-- graph container -->
+        <rect x="330" y="14" width="610" height="250" rx="10" fill="#fff" stroke="#7c4ddb" stroke-dasharray="6 4" stroke-width="1.5"/>
+        <text x="350" y="36" font-weight="700" fill="#7c4ddb">inference::Graph</text>
+
+        <rect x="350" y="48" width="280" height="96" rx="6" fill="#ece4fb" stroke="#7c4ddb" stroke-width="1.5"/>
+        <text x="490" y="68" text-anchor="middle" font-weight="600">拓扑结构 + Attributes</text>
+        <text x="362" y="88" font-size="11">n_layer = 12 → 循环 12 次 add_block()</text>
+        <text x="362" y="104" font-size="11">n_head = 12 → 注意力节点属性 n_head</text>
+        <text x="362" y="120" font-size="11">layer_norm_epsilon → layer_norm 属性 eps</text>
+        <text x="362" y="136" font-size="11">n_embd / vocab_size → 校验权重形状</text>
+
+        <rect x="650" y="48" width="270" height="96" rx="6" fill="#fdf0d6" stroke="#d98a00" stroke-width="1.5"/>
+        <text x="785" y="68" text-anchor="middle" font-weight="600">权重 Value × 148</text>
+        <text x="662" y="88" font-size="11" class="mono">add_weight(name, tensor)</text>
+        <text x="662" y="104" font-size="11">Conv1D 权重转置成 (out, in)</text>
+        <text x="662" y="120" font-size="11" fill="#d23c3c">12 个 attn.bias 掩码不入图</text>
+        <text x="662" y="136" font-size="11">wte 只登记一次，被两个节点使用</text>
+
+        <rect x="350" y="164" width="280" height="80" rx="6" fill="#e3edfc" stroke="#2f6fd6" stroke-width="1.5"/>
+        <text x="490" y="184" text-anchor="middle" font-weight="600">输入 Value × 2</text>
+        <text x="362" y="204" font-size="11" class="mono">add_input("input_ids", {T})</text>
+        <text x="362" y="222" font-size="11" class="mono">add_input("position_ids", {T})</text>
+        <text x="362" y="238" font-size="10" fill="#555">形状里的 T 在构图时确定</text>
+
+        <rect x="650" y="164" width="270" height="80" rx="6" fill="#dcf3f6" stroke="#0f8b9c" stroke-width="1.5"/>
+        <text x="785" y="184" text-anchor="middle" font-weight="600">图输出 × 1</text>
+        <text x="662" y="204" font-size="11" class="mono">mark_output(logits)</text>
+        <text x="662" y="222" font-size="11">logits 形状 (T, 50257)</text>
+
+        <!-- arrows -->
+        <path d="M220 64 H350" stroke="#2f6fd6" stroke-width="1.6" marker-end="url(#ar)"/>
+        <text x="235" y="56" fill="#2f6fd6" font-size="11">决定"怎么连"</text>
+        <path d="M220 152 H300 V6 H785 V48" stroke="#239a6a" stroke-width="1.6" fill="none" marker-end="url(#ar)"/>
+        <text x="235" y="146" fill="#239a6a" font-size="11">提供"连什么"</text>
+
+        <!-- tokenizer outside -->
+        <rect x="330" y="284" width="300" height="48" rx="6" fill="#ececec" stroke="#777" stroke-width="1.5"/>
+        <text x="480" y="304" text-anchor="middle" font-weight="600">图外：Tokenizer</text>
+        <text x="480" y="321" text-anchor="middle" font-size="11" fill="#555">文本 → id 序列，Executor::run 时作为输入传入</text>
+        <path d="M220 304 H330" stroke="#d98a00" stroke-width="1.6" marker-end="url(#ar)"/>
+        <path d="M480 284 V244" stroke="#777" stroke-width="1.6" marker-end="url(#ar)"/>
+
+        <rect x="650" y="284" width="270" height="48" rx="6" fill="#ececec" stroke="#777" stroke-width="1.5"/>
+        <text x="785" y="304" text-anchor="middle" font-weight="600">图外：采样 / 解码</text>
+        <text x="785" y="321" text-anchor="middle" font-size="11" fill="#555">logits[-1] → argmax → decode</text>
+        <path d="M785 244 V284" stroke="#777" stroke-width="1.6" marker-end="url(#ar)"/>
+
+        <text x="20" y="364" fill="#555" font-size="12">一句话：config 决定图的<b>形状</b>（有哪些节点、怎么连），safetensors 填进图的<b>权重</b>，分词器只在图的两端工作，不进入图。</text>
+      </svg>
+    </div>
+    <table>
+      <tr><th>模型文件里的东西</th><th>Graph 里的概念</th><th>对应 API</th></tr>
+      <tr><td><code>n_layer</code>、模块嵌套结构</td><td>节点和边（拓扑）</td><td><code>add_node(type, name, inputs)</code></td></tr>
+      <tr><td><code>layer_norm_epsilon</code>、<code>n_head</code></td><td>节点属性</td><td><code>Attributes::set("eps", 1e-5f)</code></td></tr>
+      <tr><td>safetensors 中的每个参数张量</td><td><code>Value::Kind::Weight</code></td><td><code>add_weight(name, tensor)</code></td></tr>
+      <tr><td>token id、位置下标</td><td><code>Value::Kind::Input</code></td><td><code>add_input(name, shape)</code></td></tr>
+      <tr><td>各层激活（文件里没有）</td><td><code>Value::Kind::Intermediate</code></td><td><code>add_node</code> 的返回值</td></tr>
+      <tr><td><code>architectures: GPT2LMHeadModel</code></td><td>用哪段构图代码</td><td>例如 <code>build_gpt2()</code></td></tr>
+    </table>
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>2. 张量名就是"挂载点"：从名字推出它连到哪个节点</h2>
+  <div class="card">
+    <div class="fig">
+      <svg viewBox="0 0 960 230" width="960" height="230" xmlns="http://www.w3.org/2000/svg" font-size="12">
+        <defs>
+          <marker id="ar2" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#555"/></marker>
+        </defs>
+        <text x="20" y="26" fill="#555">safetensors 里的一个键：</text>
+        <g class="mono" font-size="14">
+          <rect x="20" y="40" width="40" height="36" rx="4" fill="#fff" stroke="#999"/><text x="40" y="63" text-anchor="middle">h</text>
+          <text x="66" y="63">.</text>
+          <rect x="76" y="40" width="40" height="36" rx="4" fill="#e3edfc" stroke="#2f6fd6"/><text x="96" y="63" text-anchor="middle">3</text>
+          <text x="122" y="63">.</text>
+          <rect x="132" y="40" width="70" height="36" rx="4" fill="#ece4fb" stroke="#7c4ddb"/><text x="167" y="63" text-anchor="middle">attn</text>
+          <text x="208" y="63">.</text>
+          <rect x="218" y="40" width="90" height="36" rx="4" fill="#ece4fb" stroke="#7c4ddb"/><text x="263" y="63" text-anchor="middle">c_attn</text>
+          <text x="314" y="63">.</text>
+          <rect x="324" y="40" width="90" height="36" rx="4" fill="#fdf0d6" stroke="#d98a00"/><text x="369" y="63" text-anchor="middle">weight</text>
+        </g>
+        <text x="40" y="96" text-anchor="middle" font-size="11" fill="#555">块列表</text>
+        <text x="96" y="96" text-anchor="middle" font-size="11" fill="#2f6fd6">第 ℓ=3 块</text>
+        <text x="167" y="96" text-anchor="middle" font-size="11" fill="#7c4ddb">子模块</text>
+        <text x="263" y="96" text-anchor="middle" font-size="11" fill="#7c4ddb">层 → 节点</text>
+        <text x="369" y="96" text-anchor="middle" font-size="11" fill="#d98a00">参数 → 输入槽</text>
+
+        <path d="M414 58 H520" stroke="#555" stroke-width="1.5" marker-end="url(#ar2)"/>
+        <text x="430" y="50" font-size="11" fill="#555">挂到</text>
+
+        <!-- node with slots -->
+        <rect x="520" y="30" width="260" height="110" rx="8" fill="#ece4fb" stroke="#7c4ddb" stroke-width="1.6"/>
+        <text x="650" y="52" text-anchor="middle" font-weight="600">Node "h.3.attn.c_attn"</text>
+        <text x="650" y="70" text-anchor="middle" class="mono" font-size="11">type = "linear"</text>
+        <rect x="536" y="82" width="70" height="44" rx="4" fill="#dff4ea" stroke="#239a6a"/>
+        <text x="571" y="100" text-anchor="middle" font-size="11">输入 0</text>
+        <text x="571" y="116" text-anchor="middle" font-size="10">x̂ (T,768)</text>
+        <rect x="614" y="82" width="74" height="44" rx="4" fill="#fdf0d6" stroke="#d98a00" stroke-width="2"/>
+        <text x="651" y="100" text-anchor="middle" font-size="11">输入 1</text>
+        <text x="651" y="116" text-anchor="middle" font-size="10">.weight</text>
+        <rect x="696" y="82" width="70" height="44" rx="4" fill="#fdf0d6" stroke="#d98a00"/>
+        <text x="731" y="100" text-anchor="middle" font-size="11">输入 2</text>
+        <text x="731" y="116" text-anchor="middle" font-size="10">.bias</text>
+
+        <path d="M780 85 H840" stroke="#555" stroke-width="1.5" marker-end="url(#ar2)"/>
+        <rect x="840" y="64" width="100" height="44" rx="4" fill="#dff4ea" stroke="#239a6a"/>
+        <text x="890" y="84" text-anchor="middle" font-size="11">输出 qkv</text>
+        <text x="890" y="100" text-anchor="middle" font-size="10">(T, 2304)</text>
+
+        <text x="20" y="132" font-size="12" fill="#555">同理：</text>
+        <text x="20" y="152" class="mono" font-size="11">h.{ℓ}.ln_1.{weight,bias}      → layer_norm 节点的输入 1、2</text>
+        <text x="20" y="170" class="mono" font-size="11">h.{ℓ}.mlp.c_fc.{weight,bias}  → linear 节点的输入 1、2</text>
+        <text x="20" y="188" class="mono" font-size="11">wte.weight                    → embedding 节点 和 lm_head 节点（共享）</text>
+        <text x="20" y="206" class="mono" font-size="11" fill="#d23c3c">h.{ℓ}.attn.bias               → 因果掩码缓冲，不是参数，丢弃</text>
+      </svg>
+    </div>
+    <div class="theory"><span class="tag">原理</span>
+      <p>PyTorch 保存权重时，键名就是模块树上的路径（<code>state_dict</code>）。<code>GPT2LMHeadModel.transformer.h[3].attn.c_attn.weight</code> 去掉前缀就是 <code>h.3.attn.c_attn.weight</code>。所以名字本身已经编码了"这个张量属于哪一层、哪个子模块、是哪个参数"。构图代码要做的，就是对每一层按固定模板生成节点，再按名字把权重接到正确的输入槽上。可以写成一个映射：</p>
+      \[ \text{name} = \texttt{h.}\,\ell\,\texttt{.}\,\text{module}\,\texttt{.}\,\text{param} \;\;\longmapsto\;\; (\text{node} = \texttt{h.}\ell\texttt{.module},\ \ \text{slot} = \mathrm{slot}(\text{param})) \]
+      <p>其中 \(\mathrm{slot}(\texttt{weight}) = 1,\ \mathrm{slot}(\texttt{bias}) = 2\)，输入 0 留给上游激活。权重数 \(= 160 - 12 = 148\)：每块 12 个参数 × 12 块，加 <code>wte</code>、<code>wpe</code>、<code>ln_f.weight</code>、<code>ln_f.bias</code>。</p>
+    </div>
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>3. 整体计算图（宏观）</h2>
+  <div class="card">
+    <div class="fig">
+      <svg viewBox="0 0 960 640" width="960" height="640" xmlns="http://www.w3.org/2000/svg" font-size="12">
+        <defs>
+          <marker id="ar3" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#555"/></marker>
+          <marker id="ar3p" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#7c4ddb"/></marker>
+        </defs>
+        <!-- inputs -->
+        <rect x="300" y="16" width="140" height="36" rx="18" fill="#e3edfc" stroke="#2f6fd6" stroke-width="1.5"/>
+        <text x="370" y="39" text-anchor="middle" class="mono">input_ids (T)</text>
+        <rect x="520" y="16" width="160" height="36" rx="18" fill="#e3edfc" stroke="#2f6fd6" stroke-width="1.5"/>
+        <text x="600" y="39" text-anchor="middle" class="mono">position_ids (T)</text>
+
+        <!-- weights -->
+        <rect x="80" y="84" width="150" height="40" rx="4" fill="#fdf0d6" stroke="#d98a00" stroke-width="1.5"/>
+        <text x="155" y="102" text-anchor="middle" font-weight="600">wte.weight</text>
+        <text x="155" y="117" text-anchor="middle" font-size="10">(50257, 768)</text>
+        <rect x="740" y="84" width="150" height="40" rx="4" fill="#fdf0d6" stroke="#d98a00" stroke-width="1.5"/>
+        <text x="815" y="102" text-anchor="middle" font-weight="600">wpe.weight</text>
+        <text x="815" y="117" text-anchor="middle" font-size="10">(1024, 768)</text>
+
+        <!-- embedding nodes -->
+        <rect x="300" y="84" width="140" height="40" rx="8" fill="#fbe3e3" stroke="#d23c3c" stroke-dasharray="5 3" stroke-width="1.6"/>
+        <text x="370" y="102" text-anchor="middle" font-weight="600">embedding</text>
+        <text x="370" y="117" text-anchor="middle" font-size="10" class="mono">"wte"</text>
+        <rect x="530" y="84" width="140" height="40" rx="8" fill="#fbe3e3" stroke="#d23c3c" stroke-dasharray="5 3" stroke-width="1.6"/>
+        <text x="600" y="102" text-anchor="middle" font-weight="600">embedding</text>
+        <text x="600" y="117" text-anchor="middle" font-size="10" class="mono">"wpe"</text>
+
+        <path d="M370 52 V84" stroke="#555" stroke-width="1.5" marker-end="url(#ar3)"/>
+        <path d="M600 52 V84" stroke="#555" stroke-width="1.5" marker-end="url(#ar3)"/>
+        <path d="M230 104 H300" stroke="#d98a00" stroke-width="1.5" marker-end="url(#ar3)"/>
+        <path d="M740 104 H670" stroke="#d98a00" stroke-width="1.5" marker-end="url(#ar3)"/>
+
+        <!-- add -->
+        <rect x="415" y="160" width="130" height="36" rx="8" fill="#ece4fb" stroke="#7c4ddb" stroke-width="1.6"/>
+        <text x="480" y="183" text-anchor="middle" font-weight="600">add "embed"</text>
+        <path d="M370 124 V142 H450 V160" stroke="#555" stroke-width="1.5" fill="none" marker-end="url(#ar3)"/>
+        <path d="M600 124 V142 H510 V160" stroke="#555" stroke-width="1.5" fill="none" marker-end="url(#ar3)"/>
+        <text x="300" y="146" font-size="10" fill="#239a6a">(T,768)</text>
+        <text x="612" y="146" font-size="10" fill="#239a6a">(T,768)</text>
+
+        <!-- blocks -->
+        <path d="M480 196 V226" stroke="#555" stroke-width="1.5" marker-end="url(#ar3)"/>
+        <text x="490" y="216" font-size="10" fill="#239a6a">x⁽⁰⁾ (T,768)</text>
+        <rect x="330" y="226" width="300" height="52" rx="10" fill="#f4effd" stroke="#7c4ddb" stroke-width="1.6"/>
+        <text x="480" y="248" text-anchor="middle" font-weight="600">Block 0（子图，见第 4 节）</text>
+        <text x="480" y="266" text-anchor="middle" font-size="11" fill="#555">10 个节点 · 12 个权重 · 前缀 h.0.</text>
+
+        <path d="M480 278 V300" stroke="#555" stroke-width="1.5" marker-end="url(#ar3)"/>
+        <rect x="330" y="300" width="300" height="40" rx="10" fill="#f4effd" stroke="#7c4ddb" stroke-width="1.2" stroke-dasharray="4 3"/>
+        <text x="480" y="325" text-anchor="middle" fill="#555">Block 1 → Block 2 → … → Block 10</text>
+        <path d="M480 340 V362" stroke="#555" stroke-width="1.5" marker-end="url(#ar3)"/>
+
+        <rect x="330" y="362" width="300" height="52" rx="10" fill="#f4effd" stroke="#7c4ddb" stroke-width="1.6"/>
+        <text x="480" y="384" text-anchor="middle" font-weight="600">Block 11</text>
+        <text x="480" y="402" text-anchor="middle" font-size="11" fill="#555">前缀 h.11.</text>
+
+        <!-- ln_f -->
+        <path d="M480 414 V444" stroke="#555" stroke-width="1.5" marker-end="url(#ar3)"/>
+        <text x="490" y="434" font-size="10" fill="#239a6a">x⁽¹²⁾ (T,768)</text>
+        <rect x="405" y="444" width="150" height="40" rx="8" fill="#ece4fb" stroke="#7c4ddb" stroke-width="1.6"/>
+        <text x="480" y="462" text-anchor="middle" font-weight="600">layer_norm</text>
+        <text x="480" y="477" text-anchor="middle" font-size="10" class="mono">"ln_f" · eps=1e-5</text>
+        <rect x="660" y="444" width="200" height="40" rx="4" fill="#fdf0d6" stroke="#d98a00" stroke-width="1.5"/>
+        <text x="760" y="469" text-anchor="middle" font-size="11">ln_f.weight / ln_f.bias (768)</text>
+        <path d="M660 464 H555" stroke="#d98a00" stroke-width="1.5" marker-end="url(#ar3)"/>
+
+        <!-- lm_head -->
+        <path d="M480 484 V514" stroke="#555" stroke-width="1.5" marker-end="url(#ar3)"/>
+        <text x="490" y="504" font-size="10" fill="#239a6a">h̃ (T,768)</text>
+        <rect x="405" y="514" width="150" height="40" rx="8" fill="#ece4fb" stroke="#7c4ddb" stroke-width="1.6"/>
+        <text x="480" y="532" text-anchor="middle" font-weight="600">linear（无 bias）</text>
+        <text x="480" y="547" text-anchor="middle" font-size="10" class="mono">"lm_head"</text>
+
+        <!-- weight tying edge -->
+        <path d="M155 124 V534 H405" stroke="#7c4ddb" stroke-width="1.8" stroke-dasharray="6 4" fill="none" marker-end="url(#ar3p)"/>
+        <text x="165" y="300" fill="#7c4ddb" font-size="11">同一个 wte Value</text>
+        <text x="165" y="316" fill="#7c4ddb" font-size="11">consumer_count = 2</text>
+        <text x="165" y="332" fill="#7c4ddb" font-size="11">linear 算 x @ Wᵀ，</text>
+        <text x="165" y="348" fill="#7c4ddb" font-size="11">正好是 h̃ @ wteᵀ，</text>
+        <text x="165" y="364" fill="#7c4ddb" font-size="11">不用转置、不用拷贝</text>
+
+        <!-- output -->
+        <path d="M480 554 V584" stroke="#555" stroke-width="1.5" marker-end="url(#ar3)"/>
+        <rect x="385" y="584" width="190" height="40" rx="20" fill="#dcf3f6" stroke="#0f8b9c" stroke-width="1.6"/>
+        <text x="480" y="609" text-anchor="middle" class="mono">logits (T, 50257)</text>
+        <text x="590" y="609" font-size="11" fill="#555">← mark_output</text>
+      </svg>
+    </div>
+    <div class="theory"><span class="tag">原理</span>
+      <p>计算图是一个<b>有向无环图</b>（DAG）\(G = (\mathcal{V}, \mathcal{E})\)：节点是算子，边是张量。每个节点的输出只依赖它的输入：</p>
+      \[ v_{\text{out}} = \mathrm{op}_n\big(v_{\text{in},1}, \dots, v_{\text{in},k};\ \text{attrs}_n\big) \]
+      <p>整个模型就是这些函数的复合。GPT-2 的主干是一条长链：嵌入 → 12 个块 → ln_f → lm_head，块内部有残差分叉。图里共有：</p>
+      \[ |\text{nodes}| = \underbrace{3}_{\text{embed}} + \underbrace{12\times 10}_{\text{blocks}} + \underbrace{2}_{\text{ln\_f, lm\_head}} = 125,\qquad |\text{weights}| = 148,\qquad |\text{inputs}| = 2 \]
+      <p><b>权重共享</b>在图里表现为同一个 Value 有两条出边：嵌入查表读 <code>wte</code> 的行，lm_head 用它做矩阵乘。共享的是同一块内存，而不是两份拷贝。</p>
+    </div>
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>4. 单个 Transformer 块的子图（h.ℓ.*）</h2>
+  <div class="card">
+    <div class="fig">
+      <svg viewBox="0 0 960 900" width="960" height="900" xmlns="http://www.w3.org/2000/svg" font-size="12">
+        <defs>
+          <marker id="ar4" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#555"/></marker>
+          <marker id="ar4g" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#239a6a"/></marker>
+        </defs>
+        <!-- block input -->
+        <rect x="270" y="10" width="180" height="32" rx="16" fill="#dff4ea" stroke="#239a6a" stroke-width="1.5"/>
+        <text x="360" y="31" text-anchor="middle" class="mono">x⁽ℓ⁻¹⁾ (T, 768)</text>
+
+        <!-- node template: x=250 w=220 -->
+        <!-- n1 ln_1 -->
+        <path d="M360 42 V70" stroke="#555" stroke-width="1.5" marker-end="url(#ar4)"/>
+        <rect x="250" y="70" width="220" height="44" rx="8" fill="#ece4fb" stroke="#7c4ddb" stroke-width="1.6"/>
+        <text x="360" y="89" text-anchor="middle" font-weight="600">① layer_norm</text>
+        <text x="360" y="106" text-anchor="middle" font-size="10" class="mono">"h.ℓ.ln_1" · eps=1e-5</text>
+        <rect x="560" y="74" width="340" height="36" rx="4" fill="#fdf0d6" stroke="#d98a00"/>
+        <text x="730" y="96" text-anchor="middle" font-size="11" class="mono">ln_1.weight (768) · ln_1.bias (768)</text>
+        <path d="M560 92 H470" stroke="#d98a00" stroke-width="1.5" marker-end="url(#ar4)"/>
+
+        <!-- n2 c_attn -->
+        <path d="M360 114 V150" stroke="#555" stroke-width="1.5" marker-end="url(#ar4)"/>
+        <text x="370" y="136" font-size="10" fill="#239a6a">(T, 768)</text>
+        <rect x="250" y="150" width="220" height="44" rx="8" fill="#ece4fb" stroke="#7c4ddb" stroke-width="1.6"/>
+        <text x="360" y="169" text-anchor="middle" font-weight="600">② linear</text>
+        <text x="360" y="186" text-anchor="middle" font-size="10" class="mono">"h.ℓ.attn.c_attn"</text>
+        <rect x="560" y="150" width="340" height="44" rx="4" fill="#fdf0d6" stroke="#d98a00"/>
+        <text x="730" y="168" text-anchor="middle" font-size="11" class="mono">c_attn.weight (768,2304) → 转置 (2304,768)</text>
+        <text x="730" y="184" text-anchor="middle" font-size="11" class="mono">c_attn.bias (2304)</text>
+        <path d="M560 172 H470" stroke="#d98a00" stroke-width="1.5" marker-end="url(#ar4)"/>
+
+        <!-- n3 attention -->
+        <path d="M360 194 V230" stroke="#555" stroke-width="1.5" marker-end="url(#ar4)"/>
+        <text x="370" y="216" font-size="10" fill="#239a6a">qkv (T, 2304)</text>
+        <rect x="250" y="230" width="220" height="44" rx="8" fill="#fbe3e3" stroke="#d23c3c" stroke-dasharray="5 3" stroke-width="1.6"/>
+        <text x="360" y="249" text-anchor="middle" font-weight="600">③ causal_attention</text>
+        <text x="360" y="266" text-anchor="middle" font-size="10" class="mono">"h.ℓ.attn" · n_head=12</text>
+        <rect x="560" y="234" width="340" height="36" rx="4" fill="#fff" stroke="#d23c3c" stroke-dasharray="4 3"/>
+        <text x="730" y="256" text-anchor="middle" font-size="11">无权重；attn.bias 掩码改由算子内部按 s ≤ t 生成</text>
+
+        <!-- n4 c_proj -->
+        <path d="M360 274 V310" stroke="#555" stroke-width="1.5" marker-end="url(#ar4)"/>
+        <text x="370" y="296" font-size="10" fill="#239a6a">(T, 768)</text>
+        <rect x="250" y="310" width="220" height="44" rx="8" fill="#ece4fb" stroke="#7c4ddb" stroke-width="1.6"/>
+        <text x="360" y="329" text-anchor="middle" font-weight="600">④ linear</text>
+        <text x="360" y="346" text-anchor="middle" font-size="10" class="mono">"h.ℓ.attn.c_proj"</text>
+        <rect x="560" y="310" width="340" height="44" rx="4" fill="#fdf0d6" stroke="#d98a00"/>
+        <text x="730" y="328" text-anchor="middle" font-size="11" class="mono">attn.c_proj.weight (768,768) → 转置</text>
+        <text x="730" y="344" text-anchor="middle" font-size="11" class="mono">attn.c_proj.bias (768)</text>
+        <path d="M560 332 H470" stroke="#d98a00" stroke-width="1.5" marker-end="url(#ar4)"/>
+
+        <!-- n5 add -->
+        <path d="M360 354 V390" stroke="#555" stroke-width="1.5" marker-end="url(#ar4)"/>
+        <text x="370" y="376" font-size="10" fill="#239a6a">attn_out (T, 768)</text>
+        <rect x="250" y="390" width="220" height="44" rx="8" fill="#ece4fb" stroke="#7c4ddb" stroke-width="1.6"/>
+        <text x="360" y="409" text-anchor="middle" font-weight="600">⑤ add</text>
+        <text x="360" y="426" text-anchor="middle" font-size="10" class="mono">"h.ℓ.residual_1"</text>
+        <!-- residual 1 -->
+        <path d="M270 26 H150 V412 H250" stroke="#239a6a" stroke-width="2" fill="none" marker-end="url(#ar4g)"/>
+        <text x="20" y="200" fill="#239a6a" font-size="11">残差边 1</text>
+        <text x="20" y="216" fill="#239a6a" font-size="10">x⁽ℓ⁻¹⁾ 有 2 个消费者</text>
+
+        <!-- n6 ln_2 -->
+        <path d="M360 434 V470" stroke="#555" stroke-width="1.5" marker-end="url(#ar4)"/>
+        <text x="370" y="456" font-size="10" fill="#239a6a">u (T, 768)</text>
+        <rect x="250" y="470" width="220" height="44" rx="8" fill="#ece4fb" stroke="#7c4ddb" stroke-width="1.6"/>
+        <text x="360" y="489" text-anchor="middle" font-weight="600">⑥ layer_norm</text>
+        <text x="360" y="506" text-anchor="middle" font-size="10" class="mono">"h.ℓ.ln_2" · eps=1e-5</text>
+        <rect x="560" y="474" width="340" height="36" rx="4" fill="#fdf0d6" stroke="#d98a00"/>
+        <text x="730" y="496" text-anchor="middle" font-size="11" class="mono">ln_2.weight (768) · ln_2.bias (768)</text>
+        <path d="M560 492 H470" stroke="#d98a00" stroke-width="1.5" marker-end="url(#ar4)"/>
+
+        <!-- n7 c_fc -->
+        <path d="M360 514 V550" stroke="#555" stroke-width="1.5" marker-end="url(#ar4)"/>
+        <text x="370" y="536" font-size="10" fill="#239a6a">(T, 768)</text>
+        <rect x="250" y="550" width="220" height="44" rx="8" fill="#ece4fb" stroke="#7c4ddb" stroke-width="1.6"/>
+        <text x="360" y="569" text-anchor="middle" font-weight="600">⑦ linear</text>
+        <text x="360" y="586" text-anchor="middle" font-size="10" class="mono">"h.ℓ.mlp.c_fc"</text>
+        <rect x="560" y="550" width="340" height="44" rx="4" fill="#fdf0d6" stroke="#d98a00"/>
+        <text x="730" y="568" text-anchor="middle" font-size="11" class="mono">mlp.c_fc.weight (768,3072) → 转置</text>
+        <text x="730" y="584" text-anchor="middle" font-size="11" class="mono">mlp.c_fc.bias (3072)</text>
+        <path d="M560 572 H470" stroke="#d98a00" stroke-width="1.5" marker-end="url(#ar4)"/>
+
+        <!-- n8 gelu -->
+        <path d="M360 594 V630" stroke="#555" stroke-width="1.5" marker-end="url(#ar4)"/>
+        <text x="370" y="616" font-size="10" fill="#239a6a">(T, 3072)</text>
+        <rect x="250" y="630" width="220" height="44" rx="8" fill="#ece4fb" stroke="#7c4ddb" stroke-width="1.6"/>
+        <text x="360" y="649" text-anchor="middle" font-weight="600">⑧ gelu</text>
+        <text x="360" y="666" text-anchor="middle" font-size="10" class="mono">"h.ℓ.mlp.act" · tanh 近似</text>
+        <text x="560" y="656" font-size="11" fill="#555">config: activation_function = "gelu_new"</text>
+
+        <!-- n9 mlp proj -->
+        <path d="M360 674 V710" stroke="#555" stroke-width="1.5" marker-end="url(#ar4)"/>
+        <text x="370" y="696" font-size="10" fill="#239a6a">(T, 3072)</text>
+        <rect x="250" y="710" width="220" height="44" rx="8" fill="#ece4fb" stroke="#7c4ddb" stroke-width="1.6"/>
+        <text x="360" y="729" text-anchor="middle" font-weight="600">⑨ linear</text>
+        <text x="360" y="746" text-anchor="middle" font-size="10" class="mono">"h.ℓ.mlp.c_proj"</text>
+        <rect x="560" y="710" width="340" height="44" rx="4" fill="#fdf0d6" stroke="#d98a00"/>
+        <text x="730" y="728" text-anchor="middle" font-size="11" class="mono">mlp.c_proj.weight (3072,768) → 转置</text>
+        <text x="730" y="744" text-anchor="middle" font-size="11" class="mono">mlp.c_proj.bias (768)</text>
+        <path d="M560 732 H470" stroke="#d98a00" stroke-width="1.5" marker-end="url(#ar4)"/>
+
+        <!-- n10 add -->
+        <path d="M360 754 V790" stroke="#555" stroke-width="1.5" marker-end="url(#ar4)"/>
+        <text x="370" y="776" font-size="10" fill="#239a6a">(T, 768)</text>
+        <rect x="250" y="790" width="220" height="44" rx="8" fill="#ece4fb" stroke="#7c4ddb" stroke-width="1.6"/>
+        <text x="360" y="809" text-anchor="middle" font-weight="600">⑩ add</text>
+        <text x="360" y="826" text-anchor="middle" font-size="10" class="mono">"h.ℓ.residual_2"</text>
+        <!-- residual 2 -->
+        <path d="M360 446 H190 V812 H250" stroke="#239a6a" stroke-width="2" fill="none" marker-end="url(#ar4g)"/>
+        <circle cx="360" cy="446" r="3.5" fill="#239a6a"/>
+        <text x="20" y="620" fill="#239a6a" font-size="11">残差边 2</text>
+        <text x="20" y="636" fill="#239a6a" font-size="10">u 有 2 个消费者</text>
+
+        <!-- out -->
+        <path d="M360 834 V858" stroke="#555" stroke-width="1.5" marker-end="url(#ar4)"/>
+        <rect x="270" y="858" width="180" height="32" rx="16" fill="#dff4ea" stroke="#239a6a" stroke-width="1.5"/>
+        <text x="360" y="879" text-anchor="middle" class="mono">x⁽ℓ⁾ (T, 768)</text>
+        <text x="470" y="879" font-size="11" fill="#555">→ 下一块的输入</text>
+      </svg>
+    </div>
+    <div class="theory"><span class="tag">原理与公式</span>
+      <p>这张子图就是下面两行公式的逐节点展开，每个算子对应公式中的一个函数（下标是图中的节点编号）：</p>
+      \[ \begin{aligned} u &= x + \underbrace{\mathrm{Linear}_{4}\Big(\mathrm{Attn}_{3}\big(\mathrm{Linear}_{2}(\mathrm{LN}_{1}(x))\big)\Big)}_{\text{attention branch}} \qquad (\text{add}_5) \\ x' &= u + \underbrace{\mathrm{Linear}_{9}\Big(\mathrm{GELU}_{8}\big(\mathrm{Linear}_{7}(\mathrm{LN}_{6}(u))\big)\Big)}_{\text{MLP branch}} \qquad (\text{add}_{10}) \end{aligned} \]
+      <p><b>为什么要转置权重</b>：GPT-2 的 <code>Conv1D</code> 算 \(y = xW + b\)，\(W\) 形状 \((d_{in}, d_{out})\)；本项目的 <code>linear</code> 和 <code>nn.Linear</code> 一样算 \(y = xW'^{\top} + b\)，\(W'\) 形状 \((d_{out}, d_{in})\)。令 \(W' = W^{\top}\) 即可：</p>
+      \[ x\,(W^{\top})^{\top} + b = xW + b \]
+      <p>转置只在加载时做一次（<code>transpose(0,1).contiguous()</code>），推理时没有额外开销。<code>linear</code> 的形状推断检查 \(x\) 的第 1 维等于 \(W'\) 的第 1 维，所以忘了转置 <code>c_attn</code>、<code>c_fc</code>、<code>mlp.c_proj</code> 时，<code>finalize()</code> 会直接报错。但 <code>attn.c_proj</code> 是 \(768\times768\) 的方阵，转不转置形状都对得上，不会报错，只会悄悄算出错误结果。所以转置要按"所有 Conv1D 权重"统一处理，不能靠形状检查兜底，最终还要和参考实现逐层对拍。</p>
+      <p>残差边让 \(x\) 和 \(u\) 各有两个消费者，这会直接影响第 7 节的内存释放时机。</p>
+    </div>
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>5. 把 causal_attention 展开成细粒度子图</h2>
+  <div class="card">
+    <div class="fig">
+      <svg viewBox="0 0 1240 360" width="1240" height="360" xmlns="http://www.w3.org/2000/svg" font-size="12">
+        <defs>
+          <marker id="ar5" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#555"/></marker>
+        </defs>
+        <!-- qkv -->
+        <rect x="10" y="128" width="100" height="36" rx="18" fill="#dff4ea" stroke="#239a6a" stroke-width="1.5"/>
+        <text x="60" y="145" text-anchor="middle" font-size="11" class="mono">qkv</text>
+        <text x="60" y="158" text-anchor="middle" font-size="10">(T, 2304)</text>
+
+        <!-- slices -->
+        <g font-size="11">
+          <rect x="140" y="40" width="110" height="40" rx="6" fill="#fbe3e3" stroke="#d23c3c" stroke-dasharray="5 3"/>
+          <text x="195" y="58" text-anchor="middle" font-weight="600">slice</text>
+          <text x="195" y="72" text-anchor="middle" font-size="10">[:, 0:768]</text>
+          <rect x="140" y="126" width="110" height="40" rx="6" fill="#fbe3e3" stroke="#d23c3c" stroke-dasharray="5 3"/>
+          <text x="195" y="144" text-anchor="middle" font-weight="600">slice</text>
+          <text x="195" y="158" text-anchor="middle" font-size="10">[:, 768:1536]</text>
+          <rect x="140" y="212" width="110" height="40" rx="6" fill="#fbe3e3" stroke="#d23c3c" stroke-dasharray="5 3"/>
+          <text x="195" y="230" text-anchor="middle" font-weight="600">slice</text>
+          <text x="195" y="244" text-anchor="middle" font-size="10">[:, 1536:2304]</text>
+        </g>
+        <path d="M110 140 L140 60" stroke="#555" stroke-width="1.4" marker-end="url(#ar5)"/>
+        <path d="M110 146 H140" stroke="#555" stroke-width="1.4" marker-end="url(#ar5)"/>
+        <path d="M110 152 L140 232" stroke="#555" stroke-width="1.4" marker-end="url(#ar5)"/>
+
+        <!-- split heads -->
+        <g font-size="11">
+          <rect x="280" y="40" width="130" height="40" rx="6" fill="#fbe3e3" stroke="#d23c3c" stroke-dasharray="5 3"/>
+          <text x="345" y="58" text-anchor="middle" font-weight="600">split_heads</text>
+          <text x="345" y="72" text-anchor="middle" font-size="10">Q (12, T, 64)</text>
+          <rect x="280" y="126" width="130" height="40" rx="6" fill="#fbe3e3" stroke="#d23c3c" stroke-dasharray="5 3"/>
+          <text x="345" y="144" text-anchor="middle" font-weight="600">split_heads</text>
+          <text x="345" y="158" text-anchor="middle" font-size="10">K (12, T, 64)</text>
+          <rect x="280" y="212" width="130" height="40" rx="6" fill="#fbe3e3" stroke="#d23c3c" stroke-dasharray="5 3"/>
+          <text x="345" y="230" text-anchor="middle" font-weight="600">split_heads</text>
+          <text x="345" y="244" text-anchor="middle" font-size="10">V (12, T, 64)</text>
+        </g>
+        <path d="M250 60 H280" stroke="#555" stroke-width="1.4" marker-end="url(#ar5)"/>
+        <path d="M250 146 H280" stroke="#555" stroke-width="1.4" marker-end="url(#ar5)"/>
+        <path d="M250 232 H280" stroke="#555" stroke-width="1.4" marker-end="url(#ar5)"/>
+
+        <!-- K transpose -->
+        <rect x="440" y="126" width="120" height="40" rx="6" fill="#fbe3e3" stroke="#d23c3c" stroke-dasharray="5 3"/>
+        <text x="500" y="144" text-anchor="middle" font-weight="600" font-size="11">transpose(1,2)</text>
+        <text x="500" y="158" text-anchor="middle" font-size="10">Kᵀ (12, 64, T)</text>
+        <path d="M410 146 H440" stroke="#555" stroke-width="1.4" marker-end="url(#ar5)"/>
+
+        <!-- QK^T -->
+        <rect x="590" y="70" width="110" height="44" rx="6" fill="#fbe3e3" stroke="#d23c3c" stroke-dasharray="5 3"/>
+        <text x="645" y="89" text-anchor="middle" font-weight="600" font-size="11">bmm</text>
+        <text x="645" y="104" text-anchor="middle" font-size="10">(12, T, T)</text>
+        <path d="M410 60 H560 V84 H590" stroke="#555" stroke-width="1.4" fill="none" marker-end="url(#ar5)"/>
+        <path d="M560 146 H575 V100 H590" stroke="#555" stroke-width="1.4" fill="none" marker-end="url(#ar5)"/>
+
+        <!-- scale -->
+        <rect x="730" y="70" width="110" height="44" rx="6" fill="#fbe3e3" stroke="#d23c3c" stroke-dasharray="5 3"/>
+        <text x="785" y="89" text-anchor="middle" font-weight="600" font-size="11">mul_scalar</text>
+        <text x="785" y="104" text-anchor="middle" font-size="10">× 1/√64 = 0.125</text>
+        <path d="M700 92 H730" stroke="#555" stroke-width="1.4" marker-end="url(#ar5)"/>
+
+        <!-- mask -->
+        <rect x="870" y="70" width="110" height="44" rx="6" fill="#fbe3e3" stroke="#d23c3c" stroke-dasharray="5 3"/>
+        <text x="925" y="89" text-anchor="middle" font-weight="600" font-size="11">causal_mask</text>
+        <text x="925" y="104" text-anchor="middle" font-size="10">s &gt; t 置为 −∞</text>
+        <path d="M840 92 H870" stroke="#555" stroke-width="1.4" marker-end="url(#ar5)"/>
+
+        <!-- softmax -->
+        <rect x="1010" y="70" width="110" height="44" rx="6" fill="#ece4fb" stroke="#7c4ddb" stroke-width="1.6"/>
+        <text x="1065" y="89" text-anchor="middle" font-weight="600" font-size="11">softmax</text>
+        <text x="1065" y="104" text-anchor="middle" font-size="10">A (12, T, T)</text>
+        <path d="M980 92 H1010" stroke="#555" stroke-width="1.4" marker-end="url(#ar5)"/>
+
+        <!-- AV -->
+        <rect x="1010" y="210" width="110" height="44" rx="6" fill="#fbe3e3" stroke="#d23c3c" stroke-dasharray="5 3"/>
+        <text x="1065" y="229" text-anchor="middle" font-weight="600" font-size="11">bmm</text>
+        <text x="1065" y="244" text-anchor="middle" font-size="10">(12, T, 64)</text>
+        <path d="M1065 114 V210" stroke="#555" stroke-width="1.4" marker-end="url(#ar5)"/>
+        <path d="M410 232 H1010" stroke="#555" stroke-width="1.4" marker-end="url(#ar5)"/>
+        <text x="700" y="226" font-size="10" fill="#555">V 一直等到 softmax 算完才被使用</text>
+
+        <!-- merge -->
+        <rect x="1010" y="290" width="110" height="44" rx="6" fill="#fbe3e3" stroke="#d23c3c" stroke-dasharray="5 3"/>
+        <text x="1065" y="309" text-anchor="middle" font-weight="600" font-size="11">merge_heads</text>
+        <text x="1065" y="324" text-anchor="middle" font-size="10">(T, 768)</text>
+        <path d="M1065 254 V290" stroke="#555" stroke-width="1.4" marker-end="url(#ar5)"/>
+        <path d="M1120 312 H1170" stroke="#555" stroke-width="1.4" marker-end="url(#ar5)"/>
+        <text x="1175" y="316" font-size="11">→ ④</text>
+
+        <text x="10" y="300" font-size="12" fill="#555">展开后 1 个节点变成 12 个，只有 softmax 是现成的。</text>
+        <text x="10" y="320" font-size="12" fill="#555">而且现有的 matmul 只支持 2D，mul 要求两个输入同形，</text>
+        <text x="10" y="340" font-size="12" fill="#555">所以先实现一个融合的 causal_attention 节点更省事。</text>
+      </svg>
+    </div>
+    <div class="theory"><span class="tag">原理与公式</span>
+      <p>融合节点和展开子图计算的是同一个函数（\(h = 1,\dots,12\) 为头编号）：</p>
+      \[ \mathrm{CausalAttn}(\mathrm{qkv}) = \mathrm{merge}_h\Big(\mathrm{softmax}\big(\tfrac{1}{\sqrt{d_h}}\,Q_h K_h^{\top} + M\big)\, V_h\Big),\qquad M_{t,s} = \begin{cases} 0 & s \le t \\ -\infty & s \gt t \end{cases} \]
+      <p>选哪种粒度是工程上的取舍：</p>
+      <ul>
+        <li><b>细粒度</b>：每个节点简单、容易单独测试；但会把 \((12, T, T)\) 的分数矩阵作为中间 Value 存下来。\(T = 1024\) 时每个这样的张量就是 \(12\times1024^2\times4\,\text{B} = 48\,\text{MiB}\)，而上图第一个 bmm、mul_scalar、causal_mask、softmax 四步各产生一个。</li>
+        <li><b>融合节点</b>：分数矩阵只是算子内部的临时变量，逐行算完 softmax 就可以丢掉。FlashAttention 更进一步，分块计算，完全不把 \(T\times T\) 矩阵写进显存。</li>
+      </ul>
+      <p>另外，slice、split_heads、transpose 在本项目里都可以用 <code>Tensor</code> 的 view（<code>reshape</code>/<code>transpose</code>）零拷贝实现，真正需要计算的只有两次 bmm、缩放、掩码和 softmax。</p>
+    </div>
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>6. 构图代码：用本项目的 Graph API 写出来</h2>
+  <div class="card">
+    <pre id="code-build"></pre>
+    <p class="note">
+      <code>SafeTensors</code> 是假设的读取器，接口和 <a href="../include/inference/model_file.hpp"><code>ModelFile::get_tensor</code></a> 一样（目前 <code>ModelFile</code> 只读 INFR 格式）。
+      <code>embedding</code> 和 <code>causal_attention</code> 两个算子需要新增并 <code>REGISTER_OP</code>，其余都是已注册的。
+      项目的 <code>Tensor</code> 目前只有 float32，所以 <code>input_ids</code> 可以像 MNIST 的 labels 一样用 float32 存 id，在 embedding 里转成整数下标。
+    </p>
+    <div class="theory"><span class="tag">原理</span>
+      <p>构图代码只做"登记"，不做计算：<code>add_node</code> 只记录"谁是输入、用哪个算子"，返回输出 Value 的 id。真正的计算要等 <code>Executor::run</code>。这种先描述、后执行的方式叫<b>静态图</b>（define-and-run），好处是执行前就能看到整张图，可以做形状检查、内存规划和算子融合；PyTorch 默认的 eager 模式则是边执行边构图（define-by-run）。</p>
+      <p>注意 <code>add_block</code> 被调用 12 次，用的是同一个模板，只是名字前缀和权重不同。这正对应 config 里 <code>n_layer = 12</code>：config 换成 gpt2-medium（\(L = 24,\ d = 1024,\ H = 16\)），同一份构图代码就能生成 24 块的图。</p>
+    </div>
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>7. finalize()：拓扑排序 + 形状推断 + 使用计数</h2>
+  <div class="card">
+    <p class="note" style="margin-top:0">以一个块为例，<code>finalize()</code> 不跑任何计算，就能填出下表（<code>T</code> 是构图时给定的数）：</p>
+    <table>
+      <tr><th>执行序</th><th>节点</th><th>type</th><th>输入形状</th><th>输出形状</th><th>输出的消费者数</th></tr>
+      <tr><td>1</td><td>h.ℓ.ln_1</td><td>layer_norm</td><td>(T,768), (768), (768)</td><td>(T,768)</td><td>1</td></tr>
+      <tr><td>2</td><td>h.ℓ.attn.c_attn</td><td>linear</td><td>(T,768), (2304,768), (2304)</td><td>(T,2304)</td><td>1</td></tr>
+      <tr><td>3</td><td>h.ℓ.attn</td><td class="no">causal_attention</td><td>(T,2304)</td><td>(T,768)</td><td>1</td></tr>
+      <tr><td>4</td><td>h.ℓ.attn.c_proj</td><td>linear</td><td>(T,768), (768,768), (768)</td><td>(T,768)</td><td>1</td></tr>
+      <tr><td>5</td><td>h.ℓ.residual_1</td><td>add</td><td>(T,768), (T,768)</td><td>(T,768) = u</td><td><b>2</b></td></tr>
+      <tr><td>6</td><td>h.ℓ.ln_2</td><td>layer_norm</td><td>(T,768), (768), (768)</td><td>(T,768)</td><td>1</td></tr>
+      <tr><td>7</td><td>h.ℓ.mlp.c_fc</td><td>linear</td><td>(T,768), (3072,768), (3072)</td><td>(T,3072)</td><td>1</td></tr>
+      <tr><td>8</td><td>h.ℓ.mlp.act</td><td>gelu</td><td>(T,3072)</td><td>(T,3072)</td><td>1</td></tr>
+      <tr><td>9</td><td>h.ℓ.mlp.c_proj</td><td>linear</td><td>(T,3072), (768,3072), (768)</td><td>(T,768)</td><td>1</td></tr>
+      <tr><td>10</td><td>h.ℓ.residual_2</td><td>add</td><td>(T,768), (T,768)</td><td>(T,768) = x⁽ℓ⁾</td><td><b>2</b>（下一块的 ln_1 和 residual_1）</td></tr>
+    </table>
+    <div class="theory"><span class="tag">原理与公式</span>
+      <p><b>拓扑排序</b>：给节点排一个顺序，使每条边 \(u \to v\) 都满足 \(u\) 排在 \(v\) 前面。常用 Kahn 算法：反复取出入度为 0 的节点，删掉它的出边。DAG 一定存在这样的顺序，若图中有环则排不出来。GPT-2 的图基本是一条链，拓扑序就是构图顺序。</p>
+      <p><b>形状推断</b>：按拓扑序对每个节点调用 <code>Op::inference_shape</code>，例如 linear 的规则是</p>
+      \[ x: (M, K),\ \ W: (N, K),\ \ b: (N) \;\Longrightarrow\; y: (M, N) \]
+      <p>形状沿边一路传播，权重形状不匹配（比如忘了转置 Conv1D 权重）会在这一步报错，而不是等到运行时。</p>
+      <p><b>使用计数</b>：\(\mathrm{uses}(v) = |\{\,n : v \in \mathrm{inputs}(n)\,\}|\)，即有几个节点读这个 Value。Executor 每执行完一个节点就把它各输入的计数减 1，减到 0 的中间结果就可以释放。</p>
+    </div>
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>8. Executor：中间结果的生命周期与内存峰值</h2>
+  <div class="card">
+    <div class="fig">
+      <svg viewBox="0 0 960 420" width="960" height="420" xmlns="http://www.w3.org/2000/svg" font-size="12">
+        <!-- axis -->
+        <text x="20" y="24" font-weight="600">执行序 →</text>
+        <g font-size="11" text-anchor="middle" fill="#555">
+          <text x="235" y="24">0</text><text x="305" y="24">①</text><text x="375" y="24">②</text><text x="445" y="24">③</text><text x="515" y="24">④</text>
+          <text x="585" y="24">⑤</text><text x="655" y="24">⑥</text><text x="725" y="24">⑦</text><text x="795" y="24">⑧</text><text x="865" y="24">⑨</text><text x="935" y="24">⑩</text>
+        </g>
+        <g stroke="#e4e1d8">
+          <line x1="235" y1="32" x2="235" y2="300"/><line x1="305" y1="32" x2="305" y2="300"/><line x1="375" y1="32" x2="375" y2="300"/>
+          <line x1="445" y1="32" x2="445" y2="300"/><line x1="515" y1="32" x2="515" y2="300"/><line x1="585" y1="32" x2="585" y2="300"/>
+          <line x1="655" y1="32" x2="655" y2="300"/><line x1="725" y1="32" x2="725" y2="300"/><line x1="795" y1="32" x2="795" y2="300"/>
+          <line x1="865" y1="32" x2="865" y2="300"/><line x1="935" y1="32" x2="935" y2="300"/>
+        </g>
+        <!-- rows: label, size; bar from produced to last use; y step 24 -->
+        <g font-size="11">
+          <text x="20" y="52">x⁽ℓ⁻¹⁾  ×1</text>
+          <rect x="225" y="40" width="370" height="16" rx="3" fill="#dff4ea" stroke="#239a6a"/>
+          <text x="20" y="76">ln_1 out  ×1</text>
+          <rect x="295" y="64" width="90" height="16" rx="3" fill="#dff4ea" stroke="#239a6a"/>
+          <text x="20" y="100">qkv  ×3</text>
+          <rect x="365" y="88" width="90" height="16" rx="3" fill="#cdebd9" stroke="#239a6a" stroke-width="2.5"/>
+          <text x="20" y="124">attn out  ×1</text>
+          <rect x="435" y="112" width="90" height="16" rx="3" fill="#dff4ea" stroke="#239a6a"/>
+          <text x="20" y="148">c_proj out  ×1</text>
+          <rect x="505" y="136" width="90" height="16" rx="3" fill="#dff4ea" stroke="#239a6a"/>
+          <text x="20" y="172">u  ×1</text>
+          <rect x="575" y="160" width="370" height="16" rx="3" fill="#dff4ea" stroke="#239a6a"/>
+          <text x="20" y="196">ln_2 out  ×1</text>
+          <rect x="645" y="184" width="90" height="16" rx="3" fill="#dff4ea" stroke="#239a6a"/>
+          <text x="20" y="220">c_fc out  ×4</text>
+          <rect x="715" y="208" width="90" height="16" rx="3" fill="#b9e2c9" stroke="#239a6a" stroke-width="3"/>
+          <text x="20" y="244">gelu out  ×4</text>
+          <rect x="785" y="232" width="90" height="16" rx="3" fill="#b9e2c9" stroke="#239a6a" stroke-width="3"/>
+          <text x="20" y="268">mlp out  ×1</text>
+          <rect x="855" y="256" width="90" height="16" rx="3" fill="#dff4ea" stroke="#239a6a"/>
+          <text x="20" y="292">x⁽ℓ⁾  ×1</text>
+          <rect x="925" y="280" width="30" height="16" rx="3" fill="#dff4ea" stroke="#239a6a"/>
+        </g>
+        <!-- live sum bars -->
+        <text x="20" y="330" font-weight="600">同时存活</text>
+        <text x="20" y="346" font-size="10" fill="#555">（单位 T×768×4 B）</text>
+        <g>
+          <rect x="285" y="380" width="40" height="12" fill="#ece4fb" stroke="#7c4ddb"/><text x="305" y="374" text-anchor="middle" font-size="11">2</text>
+          <rect x="355" y="362" width="40" height="30" fill="#ece4fb" stroke="#7c4ddb"/><text x="375" y="356" text-anchor="middle" font-size="11">5</text>
+          <rect x="425" y="362" width="40" height="30" fill="#ece4fb" stroke="#7c4ddb"/><text x="445" y="356" text-anchor="middle" font-size="11">5</text>
+          <rect x="495" y="374" width="40" height="18" fill="#ece4fb" stroke="#7c4ddb"/><text x="515" y="368" text-anchor="middle" font-size="11">3</text>
+          <rect x="565" y="374" width="40" height="18" fill="#ece4fb" stroke="#7c4ddb"/><text x="585" y="368" text-anchor="middle" font-size="11">3</text>
+          <rect x="635" y="380" width="40" height="12" fill="#ece4fb" stroke="#7c4ddb"/><text x="655" y="374" text-anchor="middle" font-size="11">2</text>
+          <rect x="705" y="356" width="40" height="36" fill="#ece4fb" stroke="#7c4ddb"/><text x="725" y="350" text-anchor="middle" font-size="11">6</text>
+          <rect x="775" y="338" width="40" height="54" fill="#fbe3e3" stroke="#d23c3c" stroke-width="1.6"/><text x="795" y="332" text-anchor="middle" font-size="11" fill="#d23c3c" font-weight="700">9 峰值</text>
+          <rect x="845" y="356" width="40" height="36" fill="#ece4fb" stroke="#7c4ddb"/><text x="865" y="350" text-anchor="middle" font-size="11">6</text>
+          <rect x="915" y="374" width="40" height="18" fill="#ece4fb" stroke="#7c4ddb"/><text x="935" y="368" text-anchor="middle" font-size="11">3</text>
+        </g>
+        <line x1="230" y1="392" x2="960" y2="392" stroke="#999"/>
+        <text x="20" y="412" font-size="11" fill="#555">条形 = 从产生到最后一个消费者执行完；x⁽ℓ⁻¹⁾ 和 u 因为残差边要多活好几步。</text>
+      </svg>
+    </div>
+    <div class="theory"><span class="tag">原理与公式</span>
+      <p>对每个中间 Value \(v\)，记它在第 \(p(v)\) 步被产生，最后一个消费者在第 \(c(v)\) 步执行，则它的存活区间是 \([p(v),\ c(v)]\)。执行第 \(s\) 步时同时占用的内存为：</p>
+      \[ \mathrm{Mem}(s) = \sum_{v:\ p(v)\,\le\, s\,\le\, c(v)} \mathrm{bytes}(v),\qquad \mathrm{Peak} = \max_s \mathrm{Mem}(s) \]
+      <p>一个块内峰值出现在 ⑧ gelu：输入 c_fc 输出（4 份）、输出 gelu（4 份）、加上残差要用的 \(u\)（1 份），共 \(9 \times T \times 768 \times 4\) 字节。\(T = 1024\) 时约 27 MiB；如果不释放、把 12 块所有中间结果都留着，则是每块 18 份 × 12 块 ≈ 648 MiB。这就是 <code>Executor::set_reuse(true)</code> 的意义，<a href="../examples/hello_graph.cpp"><code>hello_graph</code></a> 打印的 <code>peak_bytes</code> 就是这个 \(\mathrm{Peak}\)。</p>
+      <p>还有两个比块内激活更大的东西：</p>
+      <ul>
+        <li><b>注意力分数</b>：融合节点内部的临时 \((12, T, T)\)，\(T=1024\) 时 48 MiB。</li>
+        <li><b>logits</b>：\((T, 50257)\)，\(T=1024\) 时约 196 MiB，比整个块的峰值还大得多。推理时只需要最后一行，所以常见的图优化是在 lm_head 之前插入一个"取最后一行"的节点，把 lm_head 的输入从 \((T,768)\) 变成 \((1,768)\)：logits 缩小到 196 KB，lm_head 的计算量也降为原来的 \(1/T\)。</li>
+      </ul>
+    </div>
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>9. 算子清单：现在缺什么</h2>
+  <div class="card">
+    <table>
+      <tr><th>type</th><th>本项目</th><th>在 GPT-2 图中的用途</th><th>节点数</th></tr>
+      <tr><td><code>layer_norm</code></td><td class="ok">已注册</td><td>每块 ln_1、ln_2，最后 ln_f</td><td>12×2 + 1 = 25</td></tr>
+      <tr><td><code>linear</code></td><td class="ok">已注册</td><td>c_attn、attn.c_proj、mlp.c_fc、mlp.c_proj；lm_head（无 bias，复用 wte）</td><td>12×4 + 1 = 49</td></tr>
+      <tr><td><code>add</code></td><td class="ok">已注册</td><td>两个残差 + 嵌入相加（要求两边同形，GPT-2 里都满足）</td><td>12×2 + 1 = 25</td></tr>
+      <tr><td><code>gelu</code></td><td class="ok">已注册</td><td>MLP 激活；<code>kernel.cpp</code> 用的就是 tanh 近似，与 <code>gelu_new</code> 一致</td><td>12</td></tr>
+      <tr><td><code>embedding</code></td><td class="no">需新增</td><td>按 id 取权重的行：\(\mathrm{out}[t] = W[\mathrm{id}_t]\)</td><td>2</td></tr>
+      <tr><td><code>causal_attention</code></td><td class="no">需新增</td><td>多头因果自注意力（第 5 节的融合版），属性 <code>n_head</code></td><td>12</td></tr>
+      <tr><td colspan="3" style="text-align:right"><b>合计</b></td><td><b>125</b></td></tr>
+    </table>
+    <p class="note">换句话说，在现有算子基础上再补两个，就能把 GPT-2 完整地表示成本项目的计算图。做完之后可以像 <code>hello_graph</code> 对 MNIST 那样，用 Python（<code>transformers</code>）导出每层激活，和图执行结果逐层对拍。</p>
+  </div>
+
+  <p class="sub" style="margin-top:28px">
+    相关页面：<a href="huggingface_model_files.html">模型文件格式</a> · <a href="gpt2_inference_flow.html">逐步推理与张量形状</a> ·
+    代码：<code>include/inference/graph.hpp</code> · <code>src/builtin_ops.cpp</code> · <code>examples/hello_graph.cpp</code>
+  </p>
+</main>
+
+<script type="text/plain" id="src-build">
+struct GPT2Config
+{
+    int n_layer = 12, n_head = 12, n_embd = 768, vocab_size = 50257;
+    float eps = 1e-5F;
+};
+
+// GPT-2 的 Conv1D 权重是 (in, out)，本项目 linear 要 (out, in)：加载时转置一次
+Tensor conv1d_weight(const SafeTensors &st, const std::string &name)
+{
+    return st.get_tensor(name).transpose(0, 1).contiguous();
+}
+
+ValueId add_block(Graph &g, const SafeTensors &st, const GPT2Config &cfg, int l, ValueId x)
+{
+    const std::string p = std::format("h.{}.", l);
+    auto W  = [&](const std::string &n) { return g.add_weight(p + n, st.get_tensor(p + n)); };
+    auto Wt = [&](const std::string &n) { return g.add_weight(p + n, conv1d_weight(st, p + n)); };
+    Attributes ln;   ln.set("eps", cfg.eps);
+    Attributes attn; attn.set("n_head", std::int64_t{cfg.n_head});
+
+    ValueId h = g.add_node("layer_norm", p + "ln_1", {x, W("ln_1.weight"), W("ln_1.bias")}, ln);
+    h = g.add_node("linear", p + "attn.c_attn", {h, Wt("attn.c_attn.weight"), W("attn.c_attn.bias")});
+    h = g.add_node("causal_attention", p + "attn", {h}, attn);                 // 需新增
+    h = g.add_node("linear", p + "attn.c_proj", {h, Wt("attn.c_proj.weight"), W("attn.c_proj.bias")});
+    const ValueId u = g.add_node("add", p + "residual_1", {x, h});            // 残差 1
+
+    h = g.add_node("layer_norm", p + "ln_2", {u, W("ln_2.weight"), W("ln_2.bias")}, ln);
+    h = g.add_node("linear", p + "mlp.c_fc", {h, Wt("mlp.c_fc.weight"), W("mlp.c_fc.bias")});
+    h = g.add_node("gelu", p + "mlp.act", {h});
+    h = g.add_node("linear", p + "mlp.c_proj", {h, Wt("mlp.c_proj.weight"), W("mlp.c_proj.bias")});
+    return g.add_node("add", p + "residual_2", {u, h});                        // 残差 2
+}
+
+Graph build_gpt2(const SafeTensors &st, const GPT2Config &cfg, int64 T)
+{
+    Graph g;
+    const ValueId ids = g.add_input("input_ids", {T});
+    const ValueId pos = g.add_input("position_ids", {T});
+    const ValueId wte = g.add_weight("wte.weight", st.get_tensor("wte.weight"));   // (50257, 768)
+    const ValueId wpe = g.add_weight("wpe.weight", st.get_tensor("wpe.weight"));   // (1024, 768)
+
+    const ValueId tok = g.add_node("embedding", "wte", {ids, wte});                // 需新增
+    const ValueId pe  = g.add_node("embedding", "wpe", {pos, wpe});
+    ValueId x = g.add_node("add", "embed", {tok, pe});
+
+    for (int l = 0; l < cfg.n_layer; ++l)                                           // config 决定层数
+        x = add_block(g, st, cfg, l, x);
+
+    Attributes ln; ln.set("eps", cfg.eps);
+    x = g.add_node("layer_norm", "ln_f",
+                   {x, g.add_weight("ln_f.weight", st.get_tensor("ln_f.weight")),
+                       g.add_weight("ln_f.bias", st.get_tensor("ln_f.bias"))}, ln);
+    const ValueId logits = g.add_node("linear", "lm_head", {x, wte});           // h @ wteᵀ，复用 wte
+    g.mark_output(logits);
+    g.finalize();          // 拓扑排序 + 形状推断 + 使用计数
+    return g;
+}
+
+// 使用
+// Graph g = build_gpt2(st, cfg, ids.numel());
+// Executor exec(g);
+// Tensor logits = exec.run({{"input_ids", ids}, {"position_ids", pos}})[0];
+</script>
+<script>
+document.getElementById("code-build").textContent = document.getElementById("src-build").textContent.trim();
+document.addEventListener("DOMContentLoaded", () => {
+  if (!window.renderMathInElement) return;
+  renderMathInElement(document.body, {
+    delimiters: [{ left: "\\[", right: "\\]", display: true }, { left: "\\(", right: "\\)", display: false }],
+    strict: false,
+  });
+});
+</script>
+</body>
+</html>
