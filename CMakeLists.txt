@@ -42,6 +42,7 @@ add_library(inference SHARED
     src/kernel.cpp
     src/kernel_matmul.cpp
     src/kernel_attention.cpp
+    src/thread_pool.cpp
     src/tokenizer.cpp
     src/gpt.cpp
     src/model_file.cpp

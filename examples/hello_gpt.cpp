@@ -4,10 +4,13 @@
 //   ./build/examples/06_gpt2 "Once upon a time"
 //   ./build/examples/06_gpt2 "The meaning of life is" 60 0.8
 
+#include <algorithm>
 #include <chrono>
+#include <cstdlib>
 #include <format>
 #include <iostream>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "inference/gpt.hpp"
@@ -105,6 +108,15 @@ int main(int argc, char **argv)
     const std::string prompt = argc > 1 ? argv[1] : "The capital of France is";
     const int max_new = argc > 2 ? std::stoi(argv[2]) : 40;
     const float temp = argc > 3 ? std::stof(argv[3]) : 0.0F;
+
+    // decode 是访存密集的，内存带宽 6~8 个线程就饱和了；再多的线程只会互相等
+    // （E 核掉队、自旋线程抢超线程资源）。所以推理程序默认只用一半逻辑核，
+    // 想做实验可以 INFER_NUM_THREADS=14 覆盖。llama.cpp 默认也只用物理大核。
+    if (std::getenv("INFER_NUM_THREADS") == nullptr)
+    {
+        const auto hw = static_cast<int>(std::thread::hardware_concurrency());
+        inference::kernel::set_num_threads(std::max(1, hw / 2));
+    }
 
     try
     {

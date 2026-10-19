@@ -369,6 +369,39 @@ TEST(gemv_nt_equals_matmul_nt_row)
     CHECK(y == c);
 }
 
+TEST(matmul_nt_parallel_small_m_splits_columns)
+{
+    // M < 线程数时走「按输出列切」的路径：覆盖 M=1（decode）、M=3/5（短 prompt），
+    // N 不是块大小 / 4 的倍数，以及 c 后面多出来的部分不能被写
+    constexpr std::size_t kTail = 32;
+    constexpr float kSentinel = 12345.0F;
+    const std::vector<Shape3> shapes = {
+        {1, 768, 768}, {1, 2307, 100}, {3, 1001, 77}, {5, 3072, 768}, {1, 50257, 64}};
+    for (const int nt : {2, 4, 7, 14})
+    {
+        ThreadGuard guard(nt);
+        unsigned seed = 2000;
+        for (const auto &[M, N, K] : shapes)
+        {
+            const auto a = random_vec(M * K, seed++);
+            const auto w = random_vec(N * K, seed++);
+            std::vector<float> expect(static_cast<std::size_t>(M * N));
+            kernel::matmul_nt_f32_naive(a, w, expect, M, N, K);
+            std::vector<float> c(static_cast<std::size_t>(M * N) + kTail, kSentinel);
+            kernel::matmul_nt_f32_parallel(a, w, c, M, N, K);
+            const bool tail_ok =
+                std::all_of(c.end() - kTail, c.end(), [](float v) { return v == kSentinel; });
+            c.resize(static_cast<std::size_t>(M * N));
+            const float diff = max_abs_diff(c, expect);
+            if (!tail_ok || diff > 1e-6F * static_cast<float>(K + 8))
+                throw minitest::failure("threads=" + std::to_string(nt) + " M=" +
+                                        std::to_string(M) + " N=" + std::to_string(N) +
+                                        (tail_ok ? " 结果错误" : " 越界写"));
+        }
+    }
+    PRINT("按列切的 GEMV 路径：4 种线程数 × {} 个形状全部通过", shapes.size());
+}
+
 TEST(matmul_nt_default_single_thread)
 {
     ThreadGuard guard(1);

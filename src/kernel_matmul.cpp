@@ -1,7 +1,11 @@
 #include "inference/kernel.hpp"
 #include "inference/tensor.hpp"
+#include "inference/thread_pool.hpp"
 
 #include <algorithm>
+#include <cstdlib>
+#include <memory>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -34,10 +38,12 @@ constexpr int64 kTileK = 32;
 constexpr int64 kMR = 4;
 constexpr int64 kNR = 16;
 
-int g_num_threads = 0; // 0 表示还没初始化，取硬件并发数
-// 小问题不值得开线程：创建一个线程要几十微秒，
+int g_num_threads = 0; // 0 表示还没初始化，取环境变量 INFER_NUM_THREADS 或硬件并发数
+// 小问题不值得并行：分发任务、等所有线程确认都有固定开销，
 // 如果计算本身才几十微秒，那纯粹是赔本。真实引擎都有这个阈值判断。
 constexpr int64 kParallelMinWork = 1 << 20; // M*N*K 低于 100 万就串行
+// GEMV 是访存密集的，阈值按权重大小算：W 小于 128 KB（L2 都装得下）就串行
+constexpr int64 kGemvParallelMinWeights = 1 << 15;
 
 // --- GotoBLAS 分块尺寸（v4 用）-----------------------------------------------
 // 三级存储各放一样东西，大小按 cache 容量来定：
@@ -209,6 +215,20 @@ inline float hsum256(__m256 v)
 
 #endif // INFER_HAS_AVX2
 
+// 全局线程池，线程数跟着 get_num_threads() 走：set_num_threads 改了之后，
+// 下一次用到时重建。不是线程安全的 —— 和 ThreadPool 一样，同一时刻只允许一个线程调 kernel。
+ThreadPool &pool()
+{
+    static std::unique_ptr<ThreadPool> p;
+    const int nt = get_num_threads();
+    if (!p || p->size() != nt)
+    {
+        p.reset(); // 先停掉旧线程，再建新的
+        p = std::make_unique<ThreadPool>(nt);
+    }
+    return *p;
+}
+
 // 把一段行区间 [row_begin, row_end) 分给若干线程并行处理
 template <class F> void parallel_rows(int64 total_rows, int64 work, F &&fn)
 {
@@ -221,21 +241,15 @@ template <class F> void parallel_rows(int64 total_rows, int64 work, F &&fn)
     const auto chunks = std::min<int64>(nt, total_rows);
     const int64 per = (total_rows + chunks - 1) / chunks;
 
-    // std::jthread 是 C++20 的新线程类型，比 std::thread 好在两点：
-    //   1. 析构时自动 join，不会因为忘记 join 而 std::terminate
-    //   2. 自带 stop_token，可以协作式取消（这里用不到）
-    std::vector<std::jthread> workers;
-    workers.reserve(static_cast<std::size_t>(chunks - 1));
-    for (int64 t = 1; t < chunks; ++t)
-    {
-        const int64 lo = t * per;
-        const int64 hi = std::min(lo + per, total_rows);
-        if (lo >= hi)
-            break;
-        workers.emplace_back([&fn, lo, hi] { fn(lo, hi); });
-    }
-    fn(int64{0}, std::min(per, total_rows)); // 主线程也干一份活，别闲着
-                                             // workers 析构时自动 join
+    // 块数等于线程数：GEMM 路径下每块都要打包一份 B，切得更碎只会多打包
+    pool().parallel_for(chunks,
+                        [&](int64 t)
+                        {
+                            const int64 lo = t * per;
+                            const int64 hi = std::min(lo + per, total_rows);
+                            if (lo < hi)
+                                fn(lo, hi);
+                        });
 }
 
 bool has_avx2_support() noexcept
@@ -251,8 +265,22 @@ int get_num_threads() noexcept
 {
     if (g_num_threads == 0)
     {
-        const auto hw = static_cast<int>(std::thread::hardware_concurrency());
-        g_num_threads = hw > 0 ? hw : 1;
+        // 方便做实验：INFER_NUM_THREADS=8 ./hello_gpt
+        if (const char *env = std::getenv("INFER_NUM_THREADS"))
+        {
+            try
+            {
+                g_num_threads = std::max(1, std::stoi(env));
+            }
+            catch (...)
+            {
+            }
+        }
+        if (g_num_threads == 0)
+        {
+            const auto hw = static_cast<int>(std::thread::hardware_concurrency());
+            g_num_threads = hw > 0 ? hw : 1;
+        }
     }
     return g_num_threads;
 }
@@ -566,6 +594,42 @@ void matmul_nt_f32_avx2(std::span<const float> a, std::span<const float> w, std:
 void matmul_nt_f32_parallel(std::span<const float> a, std::span<const float> w, std::span<float> c,
                             int64 M, int64 N, int64 K)
 {
+    const int nt = get_num_threads();
+    // 行数比线程数少（decode 的 M=1、短 prompt 的 prefill）：按行切会让大部分线程闲着，
+    // 改成按输出列 N 切。每个任务负责 W 中连续的一段行，算出 C 的对应几列：
+    //
+    //   W [N, K]
+    //   ┌──────────┐ 任务 0 → C[:, 0:blk]
+    //   ├──────────┤ 任务 1 → C[:, blk:2blk]
+    //   ├──────────┤ ...        每个任务顺序读自己那段 W，任务之间互不重叠
+    //   └──────────┘
+    //
+    // M>1 时同一段 W 被 M 行 x 依次使用，第二行起读的是 L2 里的热数据。
+    if (nt > 1 && M < nt && N * K >= kGemvParallelMinWeights)
+    {
+        // 任务数取线程数的 4 倍左右，让快核能多领几块；每块至少 16 行，是 4 的倍数（GEMV 一次算 4 行）
+        const int64 blk = std::max<int64>(16, (N / (int64{nt} * 4) + 3) / 4 * 4);
+        const int64 n_blocks = (N + blk - 1) / blk;
+        pool().parallel_for(
+            n_blocks,
+            [&](int64 b)
+            {
+                const int64 n0 = b * blk;
+                const int64 nb = std::min(blk, N - n0);
+                const auto wb = w.subspan(static_cast<std::size_t>(n0 * K),
+                                          static_cast<std::size_t>(nb * K));
+                for (int64 m = 0; m < M; ++m)
+                {
+                    gemv_nt_f32(
+                        a.subspan(static_cast<std::size_t>(m * K), static_cast<std::size_t>(K)),
+                        wb,
+                        c.subspan(static_cast<std::size_t>(m * N + n0), static_cast<std::size_t>(nb)),
+                        nb, K);
+                }
+            });
+        return;
+    }
+
     parallel_rows(M, M * N * K,
                   [&](int64 lo, int64 hi)
                   {
