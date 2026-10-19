@@ -91,6 +91,13 @@ void attention_f32(std::span<const float> q, std::span<const float> k, std::span
                    std::span<float> out, int64 Tq, int64 Tk, int64 n_head, int64 head_size,
                    int64 q_offset);
 
+// 同上，但每个矩阵可以有自己的行距（第 t 行从 ptr + t * ld 开始）。
+// 这样 q/k/v 可以直接指向 c_attn 输出 [T, 3C] 里的三段（ld = 3C），
+// 或者直接读 KV-Cache，都不用先拷成连续的 [T, C]。
+void attention_f32_strided(const float *q, int64 ldq, const float *k, int64 ldk, const float *v,
+                           int64 ldv, float *out, int64 ldo, int64 Tq, int64 Tk, int64 n_head,
+                           int64 head_size, int64 q_offset);
+
 // 运行期查询本次构建是否带 AVX2（-march=native 关掉时会回退到标量版）
 bool has_avx2_support() noexcept;
 // 多线程用几个线程。默认取硬件并发数，设成 1 就等于串行。

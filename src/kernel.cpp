@@ -5,8 +5,61 @@
 #include <cstddef>
 #include <numbers>
 
+#if defined(__AVX2__) && defined(__FMA__)
+#include <immintrin.h>
+#define INFER_KERNEL_AVX2 1
+#else
+#define INFER_KERNEL_AVX2 0
+#endif
+
 namespace inference::kernel
 {
+
+#if INFER_KERNEL_AVX2
+namespace
+{
+// 一次算 8 个 exp(x)。标准库没有 SIMD 版的 exp/tanh，逐个调 std::tanh 每个要 ~20 ns，
+// GPT-2 的 MLP 每个 token 要算 12 × 3072 个，光 gelu 就占了 decode 的 4%。
+//
+// 做法（Cephes 库的 expf，相对误差 ~2e-7，和 std::exp 同一量级）：
+//   1. 拆成 exp(x) = 2^n × exp(r)，n = round(x / ln2)，|r| ≤ ln2/2
+//   2. exp(r) 在这么小的区间上用 5 次多项式就足够精确
+//   3. 2^n 直接拼 IEEE 754 的指数位：(n + 127) << 23
+inline __m256 exp256_ps(__m256 x)
+{
+    x = _mm256_min_ps(x, _mm256_set1_ps(88.3762626647949F));
+    x = _mm256_max_ps(x, _mm256_set1_ps(-88.3762626647949F));
+
+    __m256 n = _mm256_fmadd_ps(x, _mm256_set1_ps(1.44269504088896341F), _mm256_set1_ps(0.5F));
+    n = _mm256_floor_ps(n);
+    // r = x - n·ln2，ln2 拆成高低两部分减，避免大 n 时丢精度
+    x = _mm256_fnmadd_ps(n, _mm256_set1_ps(0.693359375F), x);
+    x = _mm256_fnmadd_ps(n, _mm256_set1_ps(-2.12194440e-4F), x);
+
+    __m256 y = _mm256_set1_ps(1.9875691500E-4F);
+    y = _mm256_fmadd_ps(y, x, _mm256_set1_ps(1.3981999507E-3F));
+    y = _mm256_fmadd_ps(y, x, _mm256_set1_ps(8.3334519073E-3F));
+    y = _mm256_fmadd_ps(y, x, _mm256_set1_ps(4.1665795894E-2F));
+    y = _mm256_fmadd_ps(y, x, _mm256_set1_ps(1.6666665459E-1F));
+    y = _mm256_fmadd_ps(y, x, _mm256_set1_ps(5.0000001201E-1F));
+    y = _mm256_fmadd_ps(y, _mm256_mul_ps(x, x), _mm256_add_ps(x, _mm256_set1_ps(1.0F)));
+
+    const __m256i e = _mm256_slli_epi32(
+        _mm256_add_epi32(_mm256_cvttps_epi32(n), _mm256_set1_epi32(127)), 23);
+    return _mm256_mul_ps(y, _mm256_castsi256_ps(e));
+}
+
+// tanh(u) = 1 - 2 / (exp(2u) + 1)。u 很大时 exp 被截到 ~1e38，结果正确地趋于 ±1。
+// u 接近 0 时 1 - 0.99... 有相对误差，但 gelu 里它乘的是 0.5x(1 + tanh)，只在乎绝对误差（~1e-7）。
+inline __m256 tanh256_ps(__m256 u)
+{
+    const __m256 one = _mm256_set1_ps(1.0F);
+    const __m256 e2u = exp256_ps(_mm256_add_ps(u, u));
+    return _mm256_sub_ps(one, _mm256_div_ps(_mm256_set1_ps(2.0F), _mm256_add_ps(e2u, one)));
+}
+} // namespace
+#endif
+
 // ---------------------------------------------------------------------------
 // 逐元素运算
 // ---------------------------------------------------------------------------
@@ -39,7 +92,23 @@ void gelu_f32(std::span<const float> x, std::span<float> out)
     // 直觉：ReLU 在 0 处硬拐弯，GELU 是它的平滑版本，负值不会被一刀切掉。
     constexpr float kSqrt2OverPi = 0.7978845608028654F; // √(2/π)
     constexpr float kCoeff = 0.044715F;
-    for (std::size_t i = 0; i < out.size(); ++i)
+    std::size_t i = 0;
+#if INFER_KERNEL_AVX2
+    // 逐元素且只读 x[i] 写 out[i]，所以 x 和 out 是同一块内存也没问题
+    const __m256 half = _mm256_set1_ps(0.5F);
+    const __m256 one = _mm256_set1_ps(1.0F);
+    const __m256 k0 = _mm256_set1_ps(kSqrt2OverPi);
+    const __m256 k1 = _mm256_set1_ps(kCoeff);
+    for (; i + 8 <= out.size(); i += 8)
+    {
+        const __m256 v = _mm256_loadu_ps(x.data() + i);
+        const __m256 v3 = _mm256_mul_ps(_mm256_mul_ps(v, v), v);
+        const __m256 inner = _mm256_mul_ps(k0, _mm256_fmadd_ps(k1, v3, v));
+        const __m256 r = _mm256_mul_ps(_mm256_mul_ps(half, v), _mm256_add_ps(one, tanh256_ps(inner)));
+        _mm256_storeu_ps(out.data() + i, r);
+    }
+#endif
+    for (; i < out.size(); ++i)
     {
         const float v = x[i];
         const float inner = kSqrt2OverPi * (v + kCoeff * v * v * v);

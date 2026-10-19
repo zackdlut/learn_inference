@@ -504,6 +504,47 @@ prefill (5 tok)   78–107 ms                35–51 ms
 
 **预期**：短序列下省 1–2 ms；序列越长收益越大，decode 速度不再随生成长度下降。
 
+**已实现**：
+
+- `GPT::Workspace`（`x`、`h`、`qkv`、`att`、`fc` 五块缓冲区）跨调用复用，`forward_impl`
+  全部在上面原地算：layernorm、残差 `x += y`、gelu 都原地做；只有返回值 logits 每次新分配
+- `kernel::attention_f32_strided`：q/k/v 各自带行距。q 直接读 `qkv`（行距 3C），
+  用 cache 时 k/v 直接读 KV-Cache（行距 C），不用 cache 时直接读 `qkv`。
+  删掉了 `slice().contiguous()` 的三次拷贝，以及每层把整段缓存拷出来的 `ck/cv`
+- K/V 从 `qkv` 的对应列直接写进 cache
+- 顺手做了 **AVX2 版 gelu**：标准库没有 SIMD 的 `tanh`，自己实现了 8 路 `exp`
+  （Cephes 多项式，2ⁿ 直接拼浮点指数位），`tanh(u) = 1 - 2/(e^{2u}+1)`。
+  和 `std::tanh` 版的最大绝对误差 3.2e-7
+- 测试：`kernel_gelu_simd_matches_std_tanh`（24001 个点覆盖 [-12, 12]、原地计算）、
+  `kernel_attention_strided_matches_contiguous`；逐层对拍全部通过，贪心生成文本不变
+
+**实测结果**：这一轮机器发热降频严重，同一个程序前后能差 2 倍，所以用 git worktree 编出
+第 3 步的版本，和第 4 步**交替运行** 5 轮（7 线程，ms/token）：
+
+```
+              copy    attention   gelu    layernorm   串行合计(中位)   decode(中位)
+第 3 步       1.7     0.62        0.98    0.18        ~3.5             23.4
+第 4 步       0.04    0.86        0.14    0.12        ~1.2             19.1
+```
+
+几点观察：
+
+- **copy 降了 40 倍**，gelu 降了 7 倍（单线程下 0.7 ms → 0.064 ms，10 倍）
+- **attention 反而变慢了 0.2 ms**：以前拷 `ck/cv` 时顺便把 KV 数据拉进了 cache，
+  注意力读的是热数据；现在它自己承担 cache miss。合起来「copy + attention」1.9 → 0.9 ms，仍是净收益。
+  这也是测量的一课：**省掉一步时，它承担的副作用会转移到下一步**
+- **新发现：多线程时串行算子会变慢 2–3 倍**。同一时段对比：
+
+  ```
+                 attention   gelu     layernorm
+  1 线程         0.52        0.064    0.083
+  7 线程         1.23        0.19     0.16
+  ```
+
+  工作线程在两次矩阵乘之间自旋，要么和主线程抢同一个物理核的超线程资源，
+  要么主线程被调度到了 E 核上。对策是让串行部分也并行起来（第 5 步把注意力按头并行），
+  或者做线程绑核（affinity）实验
+
 ### 第 5 步：注意力内核
 
 现在的 `attention_f32` 是纯标量三重循环、单线程。短序列（几十个 token）时它占比很小，
@@ -605,7 +646,7 @@ g++ -std=c++20 -O3 -march=native /tmp/bench_bw.cpp -o /tmp/bench_bw
 | 0 加计时后复测 | 224 ms | 126 | 8.1 | 矩阵乘占 decode 98%，有效带宽 ~4 GB/s |
 | 2 GEMV + 权重转成 [out, in] | 78–107 ms | 44.9 | 22.6 | 有效带宽 ~12 GB/s，接近单线程上限 |
 | 3 多线程 + 线程池 | 35–51 ms | 19.4–22 | ~45 | 7 线程；矩阵乘 ~30 GB/s；14 线程反而更慢 |
-| 4 去拷贝 | | | | |
+| 4 去拷贝 + 工作区 + SIMD gelu | 35–50 ms | 19.1（中位） | ~52 | 与第 3 步交替 A/B：23.4 → 19.1；串行部分 3.5 → 1.2 ms |
 | 5 注意力 | | | | |
 | 6 prefill 小 M | | | | |
 | 7 量化 Q8_0 | | | | |

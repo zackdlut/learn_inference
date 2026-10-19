@@ -131,6 +131,49 @@ TEST(kernel_gelu_asymptotics)
     CHECK_NEAR(exact[1], 20.0, 1e-5);
 }
 
+TEST(kernel_gelu_simd_matches_std_tanh)
+{
+    // 元素数不是 8 的倍数：前面走 AVX2（自己实现的 exp/tanh），尾巴走标量 std::tanh。
+    // 和直接用 std::tanh 的公式逐个比，覆盖 [-12, 12] 以及原地计算（x 和 out 同一块内存）
+    constexpr std::size_t n = 24001;
+    std::vector<float> x(n);
+    for (std::size_t i = 0; i < n; ++i)
+        x[i] = -12.0F + 24.0F * static_cast<float>(i) / static_cast<float>(n - 1);
+    std::vector<float> expect(n);
+    for (std::size_t i = 0; i < n; ++i)
+    {
+        const float v = x[i];
+        expect[i] = 0.5F * v * (1.0F + std::tanh(0.7978845608028654F * (v + 0.044715F * v * v * v)));
+    }
+    std::vector<float> got = x;
+    kernel::gelu_f32(got, got);
+    const float diff = max_abs_diff(got, expect);
+    PRINT("gelu SIMD vs std::tanh 最大绝对误差 {:.2e}", diff);
+    CHECK(diff < 2e-6F);
+    CHECK(std::none_of(got.begin(), got.end(), [](float v) { return std::isnan(v); }));
+}
+
+TEST(kernel_attention_strided_matches_contiguous)
+{
+    // q/k/v 交错存放在一块 [T, 3C] 里（c_attn 的输出布局），按行距 3C 读，
+    // 结果必须和拆成三个连续 [T, C] 后调普通版完全一致
+    constexpr int64 T = 7, n_head = 3, hs = 8, C = n_head * hs;
+    const auto qkv = random_vec(static_cast<std::size_t>(T * 3 * C), 77);
+    std::vector<float> q(T * C), k(T * C), v(T * C);
+    for (int64 t = 0; t < T; ++t)
+        for (int64 j = 0; j < C; ++j)
+        {
+            q[t * C + j] = qkv[t * 3 * C + j];
+            k[t * C + j] = qkv[t * 3 * C + C + j];
+            v[t * C + j] = qkv[t * 3 * C + 2 * C + j];
+        }
+    std::vector<float> ref(T * C), got(T * C);
+    kernel::attention_f32(q, k, v, ref, T, T, n_head, hs, 0);
+    kernel::attention_f32_strided(qkv.data(), 3 * C, qkv.data() + C, 3 * C, qkv.data() + 2 * C,
+                                  3 * C, got.data(), C, T, T, n_head, hs, 0);
+    CHECK(got == ref);
+}
+
 // ---------------------------------------------------------------------------
 // softmax
 // ---------------------------------------------------------------------------

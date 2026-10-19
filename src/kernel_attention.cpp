@@ -23,11 +23,10 @@ void softmax_inplace(float *s, int64 n)
         s[i] *= inv;
 }
 
-void attention_f32(std::span<const float> q, std::span<const float> k, std::span<const float> v,
-                   std::span<float> out, int64 Tq, int64 Tk, int64 n_head, int64 head_size,
-                   int64 q_offset)
+void attention_f32_strided(const float *q, int64 ldq, const float *k, int64 ldk, const float *v,
+                           int64 ldv, float *out, int64 ldo, int64 Tq, int64 Tk, int64 n_head,
+                           int64 head_size, int64 q_offset)
 {
-    const int64 C = n_head * head_size;
     // 1/√d 这个缩放很关键：点积的方差随维度 d 线性增长，不缩放的话
     // softmax 的输入会越来越大，梯度/概率分布退化成 one-hot。
     const float scale = 1.0F / std::sqrt(static_cast<float>(head_size));
@@ -40,13 +39,13 @@ void attention_f32(std::span<const float> q, std::span<const float> k, std::span
 
         for (int64 i = 0; i < Tq; ++i)
         {
-            const float *qi = q.data() + i * C + hoff;
+            const float *qi = q + i * ldq + hoff;
             // 因果掩码：第 i 个查询的绝对位置是 q_offset+i，只能看到到这里为止
             const int64 visible = std::min(q_offset + i + 1, Tk);
 
             for (int64 j = 0; j < visible; ++j)
             {
-                const float *kj = k.data() + j * C + hoff;
+                const float *kj = k + j * ldk + hoff;
                 float dot = 0.0F;
                 for (int64 d = 0; d < head_size; ++d)
                     dot += qi[d] * kj[d];
@@ -56,17 +55,26 @@ void attention_f32(std::span<const float> q, std::span<const float> k, std::span
             softmax_inplace(scores.data(), visible);
 
             // 按注意力权重把 V 加权求和
-            float *oi = out.data() + i * C + hoff;
+            float *oi = out + i * ldo + hoff;
             std::fill(oi, oi + head_size, 0.0F);
             for (int64 j = 0; j < visible; ++j)
             {
                 const float w = scores[static_cast<std::size_t>(j)];
-                const float *vj = v.data() + j * C + hoff;
+                const float *vj = v + j * ldv + hoff;
                 for (int64 d = 0; d < head_size; ++d)
                     oi[d] += w * vj[d];
             }
         }
     }
+}
+
+void attention_f32(std::span<const float> q, std::span<const float> k, std::span<const float> v,
+                   std::span<float> out, int64 Tq, int64 Tk, int64 n_head, int64 head_size,
+                   int64 q_offset)
+{
+    const int64 C = n_head * head_size;
+    attention_f32_strided(q.data(), C, k.data(), C, v.data(), C, out.data(), C, Tq, Tk, n_head,
+                          head_size, q_offset);
 }
 
 } // namespace inference::kernel

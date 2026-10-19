@@ -213,6 +213,18 @@ class GPT
     std::vector<Layer> layers_;
     Tensor wte_, wpe_, lnf_w_, lnf_b_;
     OpProfile *profile_ = nullptr; // 非空时 forward_impl 把各算子耗时累加进去
+
+    // 前向计算的中间结果缓冲区，跨调用复用。decode 每个 token 都是 T=1，
+    // 第一次分配好之后就再也不用向系统要内存了（llama.cpp 的 compute buffer 是同一个思路）。
+    struct Workspace
+    {
+        std::vector<float> x;   // [T, C]   残差流，所有子层的输出都加到这里
+        std::vector<float> h;   // [T, C]   layernorm / 投影的输出
+        std::vector<float> qkv; // [T, 3C]  c_attn 输出，q/k/v 按行距 3C 直接读
+        std::vector<float> att; // [T, C]   注意力输出
+        std::vector<float> fc;  // [T, 4C]  MLP 中间层
+    };
+    Workspace ws_;
     // forward / forward_one / forward_trace 全都走这一个实现，区别只在参数：
     //   cache == nullptr → 不用缓存，从头算整段
     //   cache != nullptr → 读写缓存，只算新来的这几个 token

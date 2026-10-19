@@ -51,6 +51,51 @@ Tensor to_out_in(const Tensor &w)
     return dst;
 }
 
+// ---- forward_impl 用的「无分配」算子 ----
+// ops:: 里的算子每次都返回一个新 Tensor（分配 + 清零）。前向里每层要调十几次，
+// decode 每个 token 就是几百次堆分配。这里直接在调用者给的缓冲区上算。
+
+// out[r] = layernorm(x[r])，x 和 out 可以是同一块内存
+void layernorm_rows(const float *x, const Tensor &w, const Tensor &b, float *out, int64 rows,
+                    int64 cols)
+{
+    const auto n = static_cast<std::size_t>(cols);
+    for (int64 r = 0; r < rows; ++r)
+    {
+        kernel::layernorm_f32({x + r * cols, n}, w.data(), b.data(), {out + r * cols, n}, 1e-5F);
+    }
+}
+
+// out[M, N] = a[M, K] × wᵀ + bias，w 是 [N, K]
+void linear_bias(const float *a, const Tensor &w, const Tensor &bias, float *out, int64 M, int64 N,
+                 int64 K)
+{
+    kernel::matmul_nt_f32({a, static_cast<std::size_t>(M * K)}, w.data(),
+                          {out, static_cast<std::size_t>(M * N)}, M, N, K);
+    const float *b = bias.data().data();
+    for (int64 r = 0; r < M; ++r)
+    {
+        float *o = out + r * N;
+        for (int64 j = 0; j < N; ++j)
+            o[j] += b[j];
+    }
+}
+
+// x += y（残差连接），原地
+void add_inplace(float *x, const float *y, int64 n)
+{
+    for (int64 i = 0; i < n; ++i)
+        x[i] += y[i];
+}
+
+// 把缓冲区里的一段拷成 Tensor，只给 Trace（对拍）用
+Tensor to_tensor(const float *src, int64 rows, int64 cols)
+{
+    Tensor t = Tensor::zeros({rows, cols});
+    std::copy_n(src, rows * cols, t.data().begin());
+    return t;
+}
+
 // 作用域结束时把耗时加到 *acc 上。acc 为空时什么都不做，不测量就几乎零开销。
 class ScopedTimer
 {
@@ -308,22 +353,38 @@ Tensor GPT::forward_impl(std::span<const int> tokens, int start_pos, KVCache *ca
         ++prof->forwards;
     auto slot = [prof](double OpProfile::*field) { return prof ? &(prof->*field) : nullptr; };
 
-    Tensor x;
+    // 所有中间结果都放在复用的工作区里。resize 只在 T 变大时才真正分配内存，
+    // decode 阶段（T 恒为 1）每个 token 都是零分配。
+    const int64 C3 = 3 * C, C4 = 4 * C;
+    const int64 H = cfg_.n_head, hs = cfg_.head_size();
+    ws_.x.resize(static_cast<std::size_t>(T * C));
+    ws_.h.resize(static_cast<std::size_t>(T * C));
+    ws_.qkv.resize(static_cast<std::size_t>(T * C3));
+    ws_.att.resize(static_cast<std::size_t>(T * C));
+    ws_.fc.resize(static_cast<std::size_t>(T * C4));
+    float *const x = ws_.x.data();
+    float *const h = ws_.h.data();
+    float *const qkv = ws_.qkv.data();
+    float *const att = ws_.att.data();
+    float *const fc = ws_.fc.data();
+
     {
         ScopedTimer tm(slot(&OpProfile::embed));
-        x = ops::embedding(wte_, tokens);
-        std::span<float> xv = x.data();
-        std::span<const float> pe = wpe_.data();
+        const float *te = wte_.data().data();
+        const float *pe = wpe_.data().data();
         for (int64 t = 0; t < T; ++t)
         {
-            const auto src = static_cast<std::size_t>(start_pos + t) * static_cast<std::size_t>(C);
-            const auto dst = static_cast<std::size_t>(t) * static_cast<std::size_t>(C);
+            const int id = tokens[static_cast<std::size_t>(t)];
+            if (id < 0 || id >= cfg_.n_vocab)
+                fail(std::format("token id {} 越界，词表只有 {} 项", id, cfg_.n_vocab));
+            const float *tok_row = te + static_cast<int64>(id) * C;
+            const float *pos_row = pe + (start_pos + t) * C;
             for (int64 j = 0; j < C; ++j)
-                xv[dst + static_cast<std::size_t>(j)] += pe[src + static_cast<std::size_t>(j)];
+                x[t * C + j] = tok_row[j] + pos_row[j];
         }
     }
     if (trace)
-        trace->embed = x;
+        trace->embed = to_tensor(x, T, C);
 
     // --- 2. 12 个 Transformer Block ---
     for (int li = 0; li < cfg_.n_layer; ++li)
@@ -333,106 +394,108 @@ Tensor GPT::forward_impl(std::span<const int> tokens, int start_pos, KVCache *ca
         // ---- 注意力子层 ----
         // 注意 LayerNorm 在**进入**子层前做（pre-norm）。原版 Transformer 是
         // 做完子层再 norm（post-norm），GPT-2 改成了 pre-norm，训练更稳。
-        Tensor h;
         {
             ScopedTimer tm(slot(&OpProfile::layernorm));
-            h = ops::layernorm(x, L.ln1_w, L.ln1_b);
+            layernorm_rows(x, L.ln1_w, L.ln1_b, h, T, C);
         }
 
         // 一次矩阵乘同时算出 Q、K、V：权重 [3C, C] 是三个 [C, C] 上下拼起来的。
         // 合并成一次比分三次快 —— 大矩阵乘的访存效率更高。
-        Tensor qkv;
+        // 输出 [T, 3C] 的每一行是 [q | k | v]，后面直接按行距 3C 读，不拆成三个张量。
         {
             ScopedTimer tm(slot(&OpProfile::qkv));
-            qkv = ops::linear(h, L.attn_w, L.attn_b); // [T, 3C]
+            linear_bias(h, L.attn_w, L.attn_b, qkv, T, C3, C);
         }
 
-        Tensor q, k, v;
-        {
-            ScopedTimer tm(slot(&OpProfile::copy));
-            q = qkv.slice(1, 0, C).contiguous();
-            k = qkv.slice(1, C, 2 * C).contiguous();
-            v = qkv.slice(1, 2 * C, 3 * C).contiguous();
-        }
-
-        Tensor y;
+        // k/v 从哪读：用 cache 时读缓存里的全部历史，不用时直接读 qkv
+        const float *k_src = qkv + C;
+        const float *v_src = qkv + 2 * C;
+        int64 ld_kv = C3;
+        int64 Tk = T;
         if (cache)
         {
-            // 新算出的 K/V 存进缓存，然后拿**全部历史** K/V 做注意力。
-            // q_offset = start_pos 告诉 kernel：我这批 query 的绝对位置从哪开始。
-            Tensor ck, cv;
+            // 新算出的 K/V 写进缓存，然后拿**全部历史** K/V 做注意力。
+            // 注意力直接读缓存本身 —— 以前这里每层都把整段缓存拷出来一份，
+            // 生成第 n 个 token 时要拷 n 行，KV-Cache 想省掉的 O(n) 又被加了回来。
+            ScopedTimer tm(slot(&OpProfile::copy));
+            for (int64 t = 0; t < T; ++t)
             {
-                ScopedTimer tm(slot(&OpProfile::copy));
-                cache->append(li, start_pos, k.data(), v.data());
-                ck = Tensor::zeros({cache->length(), C});
-                cv = Tensor::zeros({cache->length(), C});
-                std::ranges::copy(cache->keys(li), ck.data().begin());
-                std::ranges::copy(cache->values(li), cv.data().begin());
+                const float *row = qkv + t * C3;
+                cache->append(li, start_pos + static_cast<int>(t),
+                              {row + C, static_cast<std::size_t>(C)},
+                              {row + 2 * C, static_cast<std::size_t>(C)});
             }
-            ScopedTimer tm(slot(&OpProfile::attention));
-            y = ops::attention(q, ck, cv, cfg_.n_head, start_pos);
+            k_src = cache->keys(li).data();
+            v_src = cache->values(li).data();
+            ld_kv = C;
+            Tk = cache->length();
         }
-        else
         {
+            // q_offset = start_pos 告诉 kernel：这批 query 的绝对位置从哪开始
             ScopedTimer tm(slot(&OpProfile::attention));
-            y = ops::attention(q, k, v, cfg_.n_head, start_pos);
+            kernel::attention_f32_strided(qkv, C3, k_src, ld_kv, v_src, ld_kv, att, C, T, Tk, H,
+                                          hs, start_pos);
         }
 
         {
             ScopedTimer tm(slot(&OpProfile::attn_proj));
-            y = ops::linear(y, L.attn_proj_w, L.attn_proj_b);
+            linear_bias(att, L.attn_proj_w, L.attn_proj_b, h, T, C, C);
         }
         {
             ScopedTimer tm(slot(&OpProfile::residual));
-            x = ops::add(x, y); // 残差连接
+            add_inplace(x, h, T * C); // 残差连接
         }
         if (trace && li == 0)
-            trace->l0_attn_out = x;
+            trace->l0_attn_out = to_tensor(x, T, C);
 
         // ---- MLP 子层 ----
         // 先升维到 4C（3072）再降回来。这一段占了模型 2/3 的计算量，
         // 一般认为它是模型「存事实知识」的地方。
         {
             ScopedTimer tm(slot(&OpProfile::layernorm));
-            h = ops::layernorm(x, L.ln2_w, L.ln2_b);
+            layernorm_rows(x, L.ln2_w, L.ln2_b, h, T, C);
         }
         {
             ScopedTimer tm(slot(&OpProfile::mlp_fc));
-            h = ops::linear(h, L.fc_w, L.fc_b);
+            linear_bias(h, L.fc_w, L.fc_b, fc, T, C4, C);
         }
         {
             ScopedTimer tm(slot(&OpProfile::gelu));
-            h = ops::gelu(h);
+            const auto n = static_cast<std::size_t>(T * C4);
+            kernel::gelu_f32({fc, n}, {fc, n}); // 原地
         }
         {
             ScopedTimer tm(slot(&OpProfile::mlp_proj));
-            h = ops::linear(h, L.proj_w, L.proj_b);
+            linear_bias(fc, L.proj_w, L.proj_b, h, T, C, C4);
         }
         {
             ScopedTimer tm(slot(&OpProfile::residual));
-            x = ops::add(x, h); // 残差连接
+            add_inplace(x, h, T * C); // 残差连接
         }
         if (trace && li == 0)
-            trace->l0_out = x;
+            trace->l0_out = to_tensor(x, T, C);
     }
 
     // --- 3. 最后的 LayerNorm + 输出投影 ---
     {
         ScopedTimer tm(slot(&OpProfile::layernorm));
-        x = ops::layernorm(x, lnf_w_, lnf_b_);
+        layernorm_rows(x, lnf_w_, lnf_b_, h, T, C);
     }
     if (trace)
-        trace->final_norm = x;
+        trace->final_norm = to_tensor(h, T, C);
 
     ScopedTimer tm(slot(&OpProfile::lm_head));
     // 只要最后一个位置的 logits 时，别把 T×50257 全算出来。
     // T=5 时这一步能省 80% 的输出层计算；prompt 越长省得越多。
-    if (last_only && T > 1)
-        x = x.slice(0, T - 1, T).contiguous();
+    const int64 rows = last_only ? 1 : T;
+    const float *last = h + (T - rows) * C;
 
     // 输出层复用词嵌入矩阵（weight tying）：logits = x @ wteᵀ。
-    // wte 是 [n_vocab, C]，正好是 ops::linear 要的 (out, in) 布局。
-    Tensor logits = ops::linear(x, wte_);
+    // wte 是 [n_vocab, C]，正好是 matmul_nt 要的 (out, in) 布局。
+    // logits 是返回值，只有它每次新分配。
+    Tensor logits = Tensor::zeros({rows, cfg_.n_vocab});
+    kernel::matmul_nt_f32({last, static_cast<std::size_t>(rows * C)}, wte_.data(), logits.data(),
+                          rows, cfg_.n_vocab, C);
     if (trace)
         trace->logits = logits;
     return logits;
