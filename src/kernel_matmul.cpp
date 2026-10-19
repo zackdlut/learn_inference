@@ -390,6 +390,92 @@ void matmul_f32(std::span<const float> a, std::span<const float> b, std::span<fl
 }
 
 // ---------------------------------------------------------------------------
+// GEMV：y = W · x（M=1 的 NT 矩阵乘，decode 阶段的主角）
+//
+// M=1 时每个权重只用一次，没有任何复用可言，GEMM 那套打包、寄存器分块都成了纯开销。
+// 这里唯一的目标是让 W 以最快速度顺序流过 CPU：
+//   - 不打包，W 一行一行顺序读
+//   - x 只有 K 个 float（≤ 12 KB），全程留在 L1
+//   - 一次算 4 个输出：读一次 x 的 8 个数，喂给 4 行 W，x 的加载开销摊薄到 1/4
+//   - 每行 2 个累加器、k 一次走 16：共 8 条独立的 FMA 依赖链。
+//     FMA 延迟 4 周期、每周期能发 2 条，至少要 8 条链并行才不会互相等。
+// ---------------------------------------------------------------------------
+#if INFER_HAS_AVX2
+namespace
+{
+// 一行 W 和 x 的点积，用于 N 不是 4 的倍数时剩下的行
+float dot_row_avx2(const float *x, const float *w, int64 K)
+{
+    __m256 acc0 = _mm256_setzero_ps(), acc1 = _mm256_setzero_ps();
+    int64 k = 0;
+    for (; k + 16 <= K; k += 16)
+    {
+        acc0 = _mm256_fmadd_ps(_mm256_loadu_ps(x + k), _mm256_loadu_ps(w + k), acc0);
+        acc1 = _mm256_fmadd_ps(_mm256_loadu_ps(x + k + 8), _mm256_loadu_ps(w + k + 8), acc1);
+    }
+    for (; k + 8 <= K; k += 8)
+        acc0 = _mm256_fmadd_ps(_mm256_loadu_ps(x + k), _mm256_loadu_ps(w + k), acc0);
+    float sum = hsum256(_mm256_add_ps(acc0, acc1));
+    for (; k < K; ++k)
+        sum += x[k] * w[k];
+    return sum;
+}
+} // namespace
+#endif
+
+void gemv_nt_f32(std::span<const float> x, std::span<const float> w, std::span<float> y, int64 N,
+                 int64 K)
+{
+#if INFER_HAS_AVX2
+    const float *px = x.data();
+    const float *pw = w.data();
+    float *py = y.data();
+    const int64 n_main = N / 4 * 4;
+    const int64 k16 = K / 16 * 16;
+
+    for (int64 n = 0; n < n_main; n += 4)
+    {
+        const float *w0 = pw + (n + 0) * K;
+        const float *w1 = pw + (n + 1) * K;
+        const float *w2 = pw + (n + 2) * K;
+        const float *w3 = pw + (n + 3) * K;
+        __m256 a0 = _mm256_setzero_ps(), b0 = _mm256_setzero_ps();
+        __m256 a1 = _mm256_setzero_ps(), b1 = _mm256_setzero_ps();
+        __m256 a2 = _mm256_setzero_ps(), b2 = _mm256_setzero_ps();
+        __m256 a3 = _mm256_setzero_ps(), b3 = _mm256_setzero_ps();
+
+        for (int64 k = 0; k < k16; k += 16)
+        {
+            const __m256 xa = _mm256_loadu_ps(px + k);
+            const __m256 xb = _mm256_loadu_ps(px + k + 8);
+            a0 = _mm256_fmadd_ps(xa, _mm256_loadu_ps(w0 + k), a0);
+            b0 = _mm256_fmadd_ps(xb, _mm256_loadu_ps(w0 + k + 8), b0);
+            a1 = _mm256_fmadd_ps(xa, _mm256_loadu_ps(w1 + k), a1);
+            b1 = _mm256_fmadd_ps(xb, _mm256_loadu_ps(w1 + k + 8), b1);
+            a2 = _mm256_fmadd_ps(xa, _mm256_loadu_ps(w2 + k), a2);
+            b2 = _mm256_fmadd_ps(xb, _mm256_loadu_ps(w2 + k + 8), b2);
+            a3 = _mm256_fmadd_ps(xa, _mm256_loadu_ps(w3 + k), a3);
+            b3 = _mm256_fmadd_ps(xb, _mm256_loadu_ps(w3 + k + 8), b3);
+        }
+
+        float s[4] = {hsum256(_mm256_add_ps(a0, b0)), hsum256(_mm256_add_ps(a1, b1)),
+                      hsum256(_mm256_add_ps(a2, b2)), hsum256(_mm256_add_ps(a3, b3))};
+        const float *rows[4] = {w0, w1, w2, w3};
+        // K 不是 16 的倍数时剩下的 0~15 个数
+        for (int64 k = k16; k < K; ++k)
+            for (int r = 0; r < 4; ++r)
+                s[r] += px[k] * rows[r][k];
+        for (int r = 0; r < 4; ++r)
+            py[n + r] = s[r];
+    }
+    for (int64 n = n_main; n < N; ++n)
+        py[n] = dot_row_avx2(px, pw + n * K, K);
+#else
+    matmul_nt_f32_naive(x, w, y, 1, N, K);
+#endif
+}
+
+// ---------------------------------------------------------------------------
 // NT 版本（C = A × Wᵀ，linear 层用的就是它）
 // ---------------------------------------------------------------------------
 void matmul_nt_f32_avx2(std::span<const float> a, std::span<const float> w, std::span<float> c,
@@ -464,16 +550,13 @@ void matmul_nt_f32_avx2(std::span<const float> a, std::span<const float> w, std:
             }
         }
     }
-    // 下面不足 4 行的边角
+    // 下面不足 4 行的边角：每行就是一次 GEMV。
+    // decode（M=1）整个矩阵乘都走这里，所以它不能是标量循环。
     for (int64 i = m_main; i < M; ++i)
     {
-        for (int64 j = 0; j < N; ++j)
-        {
-            float sum = 0.0F;
-            for (int64 k = 0; k < K; ++k)
-                sum += pa[i * K + k] * pw[j * K + k];
-            pc[i * N + j] = sum;
-        }
+        gemv_nt_f32(a.subspan(static_cast<std::size_t>(i * K), static_cast<std::size_t>(K)), w,
+                    c.subspan(static_cast<std::size_t>(i * N), static_cast<std::size_t>(N)), N,
+                    K);
     }
 #else
     matmul_nt_f32_naive(a, w, c, M, N, K);

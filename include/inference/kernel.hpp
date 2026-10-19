@@ -44,6 +44,11 @@ void matmul_f32(std::span<const float> a, std::span<const float> b, std::span<fl
 void matmul_nt_f32(std::span<const float> a, std::span<const float> w, std::span<float> c, int64 M,
                    int64 N, int64 K);
 
+// y[N] = W[N,K] · x[K]，即 M=1 的 matmul_nt。decode 每生成一个 token 都走这里，
+// 它是访存密集的：目标是把 W 以内存带宽的速度读完，而不是算得快。
+void gemv_nt_f32(std::span<const float> x, std::span<const float> w, std::span<float> y, int64 N,
+                 int64 K);
+
 void matmul_nt_f32_naive(std::span<const float> a, std::span<const float> w, std::span<float> c,
                          int64 M, int64 N, int64 K);
 void matmul_nt_f32_tiled(std::span<const float> a, std::span<const float> w, std::span<float> c,

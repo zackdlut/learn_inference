@@ -204,10 +204,11 @@ class GPT
     struct Layer
     {
         Tensor ln1_w, ln1_b, ln2_w, ln2_b;
-        Tensor attn_w, attn_b; // c_attn: [n_embd, 3*n_embd]
+        // 矩阵权重在加载时已从 Conv1D 的 [in, out] 转成 [out, in]，配合 ops::linear 使用
+        Tensor attn_w, attn_b; // c_attn: [3*n_embd, n_embd]
         Tensor attn_proj_w, attn_proj_b;
-        Tensor fc_w, fc_b;     // c_fc:   [n_embd, 4*n_embd]
-        Tensor proj_w, proj_b; // c_proj: [4*n_embd, n_embd]
+        Tensor fc_w, fc_b;     // c_fc:   [4*n_embd, n_embd]
+        Tensor proj_w, proj_b; // c_proj: [n_embd, 4*n_embd]
     };
     std::vector<Layer> layers_;
     Tensor wte_, wpe_, lnf_w_, lnf_b_;

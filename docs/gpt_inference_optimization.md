@@ -350,6 +350,41 @@ decode 131 ms → ~60 ms。
 
 **验证**：`tests/` 里给 `gemv` 加用例，和 `matmul_nt_f32_naive` 对比，覆盖 K、N 不是 8/4 倍数的情况。
 
+**已实现**：
+
+- `kernel::gemv_nt_f32`（`src/kernel_matmul.cpp`）：一次算 4 个输出，每行 2 个累加器、k 一次走 16，
+  共 8 条独立 FMA 链；N 的尾巴用单行点积，K 的尾巴用标量补
+- `matmul_nt_f32_avx2` 里不足 4 行的部分改为逐行调用 GEMV（原来是标量三重循环）
+- `GPT::load` 用 `to_out_in()` 把 4 个 Conv1D 权重转置成 `[out, in]`（32×32 分块转置），
+  forward 里的 `ops::affine` 全部换成 `ops::linear`
+- 测试：`gemv_nt_matches_reference`（12 个形状，含 GPT-2 真实形状、越界写检查）、
+  `gemv_nt_equals_matmul_nt_row`
+
+**实测结果**（Release，温度 0）：
+
+```
+                       改之前                    改之后
+算子              ms/token  有效带宽       ms/token  有效带宽
+qkv (c_attn)       22.5     3.8 GB/s        7.1    12.0 GB/s
+attn_proj           7.4     3.8 GB/s        2.5    11.5 GB/s
+mlp_fc             27.9     4.1 GB/s        9.3    12.1 GB/s
+mlp_proj           27.5     4.1 GB/s        8.9    12.8 GB/s
+lm_head            38.4     4.0 GB/s       14.0    11.0 GB/s
+decode 合计       126                      44.9     （2.8×）
+prefill (5 tok)   224 ms                   78–107 ms
+```
+
+几点观察：
+
+- 有效带宽 ~12 GB/s，已经接近**单线程**带宽上限 15.6 GB/s。单线程能做的基本做完了，
+  剩下的 3 倍要靠第 3 步的多线程。
+- prefill 也顺带快了 2 倍多：M=5 时 `matmul_nt_f32_parallel` 把 5 行分给 5 个线程，
+  每个线程都是 M=1，现在走 GEMV，不再各自打包一份权重。
+- 代价：加载时多了一次转置，加载时间 ~1.1 s → ~1.5 s（朴素转置是 2.1 s，分块后降下来）。
+  更彻底的做法是在 `tools/convert_gpt2.py` 里就存成 `[out, in]`，加载时零开销。
+- 现在矩阵乘之外的部分（拷贝 1.5 ms、gelu 0.7 ms、注意力 0.4 ms）占 decode 的 ~7%，
+  第 3 步之后比例还会上升，到时就轮到第 4 步了。
+
 ### 第 3 步：GEMV 多线程 + 线程池
 
 **原理**：单核带宽只有 15.6 GB/s，8 核才能打满 38 GB/s。M=1 不能按行切，
@@ -496,7 +531,7 @@ g++ -std=c++20 -O3 -march=native /tmp/bench_bw.cpp -o /tmp/bench_bw
 | 起点 Debug | 1376 ms | 751 | 1.3 | `-O0` + ASan + UBSan |
 | 1 Release | 219 ms | 131 | 7.6 | |
 | 0 加计时后复测 | 224 ms | 126 | 8.1 | 矩阵乘占 decode 98%，有效带宽 ~4 GB/s |
-| 2 GEMV | | | | |
+| 2 GEMV + 权重转成 [out, in] | 78–107 ms | 44.9 | 22.6 | 有效带宽 ~12 GB/s，接近单线程上限 |
 | 3 多线程 + 线程池 | | | | |
 | 4 去拷贝 | | | | |
 | 5 注意力 | | | | |

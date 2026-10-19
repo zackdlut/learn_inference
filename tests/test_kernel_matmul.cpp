@@ -326,6 +326,49 @@ TEST(matmul_nt_avx2_matches_reference)
     check_nt("matmul_nt_f32_avx2", kernel::matmul_nt_f32_avx2, 700);
 }
 
+TEST(gemv_nt_matches_reference)
+{
+    // 覆盖：N 非 4 的倍数（单行点积尾巴）、K 非 16 / 8 的倍数（标量补尾）、
+    // K<8（一次 SIMD 都不走），以及 GPT-2 的真实形状
+    const std::vector<std::pair<int64, int64>> shapes = {
+        {1, 1},     {3, 5},     {4, 16},    {5, 17},     {7, 24},    {8, 33},
+        {13, 7},    {64, 64},   {65, 100},  {130, 129},  {2304, 768}, {768, 3072},
+    };
+    float worst = 0.0F;
+    unsigned seed = 1800;
+    for (const auto &[N, K] : shapes)
+    {
+        const auto x = random_vec(K, seed++);
+        const auto b = random_vec(K * N, seed++);
+        const auto w = transpose(b, K, N);
+        const auto expect = reference_nn(x, b, 1, N, K);
+        std::vector<float> y(static_cast<std::size_t>(N) + 8, 12345.0F);
+        kernel::gemv_nt_f32(x, w, y, N, K);
+        const bool tail_ok =
+            std::all_of(y.begin() + N, y.end(), [](float v) { return v == 12345.0F; });
+        y.resize(static_cast<std::size_t>(N));
+        const float diff = max_abs_diff(y, expect);
+        const auto tol = 1e-6F * static_cast<float>(K + 8);
+        if (!tail_ok || diff > tol)
+            throw minitest::failure("gemv_nt_f32 在 N=" + std::to_string(N) + " K=" +
+                                    std::to_string(K) + (tail_ok ? " 误差过大" : " 越界写"));
+        worst = std::max(worst, diff / tol);
+    }
+    PRINT("gemv_nt_f32: {} 个形状全部通过，最大误差占容差 {:.1f}%", shapes.size(), worst * 100);
+}
+
+TEST(gemv_nt_equals_matmul_nt_row)
+{
+    // M=1 的 matmul_nt 现在直接走 gemv，结果应该逐位相同
+    constexpr int64 N = 101, K = 77;
+    const auto x = random_vec(K, 1900);
+    const auto w = random_vec(N * K, 1901);
+    std::vector<float> y(N), c(N);
+    kernel::gemv_nt_f32(x, w, y, N, K);
+    kernel::matmul_nt_f32_avx2(x, w, c, 1, N, K);
+    CHECK(y == c);
+}
+
 TEST(matmul_nt_default_single_thread)
 {
     ThreadGuard guard(1);

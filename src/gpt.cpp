@@ -27,6 +27,30 @@ double ms_since(Clock::time_point t0)
     return std::chrono::duration<double, std::milli>(Clock::now() - t0).count();
 }
 
+// HuggingFace 的 Conv1D 把权重存成 [in, out]，这里转成 PyTorch Linear 的 [out, in]。
+// 这样每个输出对应 W 的一行连续内存，整个模型只需要 matmul_nt / gemv_nt 一套内核。
+// 只在加载时做一次，不走 Tensor::contiguous() 的通用多维下标循环 —— 那个对 8500 万个元素太慢。
+// 按 32×32 分块转置：朴素写法每写一个元素就跨一整行，几乎每次都 cache miss；
+// 分块后读写两边都落在 32 条 cache line 以内。
+Tensor to_out_in(const Tensor &w)
+{
+    constexpr int64 kBlock = 32;
+    const int64 rows = w.dim(0), cols = w.dim(1);
+    const Tensor src = w.contiguous();
+    Tensor dst = Tensor::zeros({cols, rows});
+    const float *s = src.data().data();
+    float *d = dst.data().data();
+    for (int64 r0 = 0; r0 < rows; r0 += kBlock)
+        for (int64 c0 = 0; c0 < cols; c0 += kBlock)
+        {
+            const int64 r1 = std::min(r0 + kBlock, rows), c1 = std::min(c0 + kBlock, cols);
+            for (int64 r = r0; r < r1; ++r)
+                for (int64 c = c0; c < c1; ++c)
+                    d[c * rows + r] = s[r * cols + c];
+        }
+    return dst;
+}
+
 // 作用域结束时把耗时加到 *acc 上。acc 为空时什么都不做，不测量就几乎零开销。
 class ScopedTimer
 {
@@ -228,13 +252,13 @@ GPT GPT::load(const std::string &model_dir)
             L.ln1_b = w.get_tensor(p + "ln_1.bias");
             L.ln2_w = w.get_tensor(p + "ln_2.weight");
             L.ln2_b = w.get_tensor(p + "ln_2.bias");
-            L.attn_w = w.get_tensor(p + "attn.c_attn.weight");
+            L.attn_w = to_out_in(w.get_tensor(p + "attn.c_attn.weight"));
             L.attn_b = w.get_tensor(p + "attn.c_attn.bias");
-            L.attn_proj_w = w.get_tensor(p + "attn.c_proj.weight");
+            L.attn_proj_w = to_out_in(w.get_tensor(p + "attn.c_proj.weight"));
             L.attn_proj_b = w.get_tensor(p + "attn.c_proj.bias");
-            L.fc_w = w.get_tensor(p + "mlp.c_fc.weight");
+            L.fc_w = to_out_in(w.get_tensor(p + "mlp.c_fc.weight"));
             L.fc_b = w.get_tensor(p + "mlp.c_fc.bias");
-            L.proj_w = w.get_tensor(p + "mlp.c_proj.weight");
+            L.proj_w = to_out_in(w.get_tensor(p + "mlp.c_proj.weight"));
             L.proj_b = w.get_tensor(p + "mlp.c_proj.bias");
             m.layers_.push_back(std::move(L));
         }
@@ -248,11 +272,11 @@ GPT GPT::load(const std::string &model_dir)
         fail(std::format("wte 形状应为 ({}, {})，实际 ({}, {})", m.cfg_.n_vocab, C, m.wte_.dim(0),
                          m.wte_.dim(1)));
     }
-    if (m.layers_[0].attn_w.dim(0) != C || m.layers_[0].attn_w.dim(1) != 3 * C)
+    if (m.layers_[0].attn_w.dim(0) != 3 * C || m.layers_[0].attn_w.dim(1) != C)
     {
-        fail(std::format("c_attn 形状应为 ({}, {})，实际 ({}, {})。"
-                         "注意 HuggingFace 的 Conv1D 是 (in, out) 布局，别转置。",
-                         C, 3 * C, m.layers_[0].attn_w.dim(0), m.layers_[0].attn_w.dim(1)));
+        fail(std::format("c_attn 转置后形状应为 ({}, {})，实际 ({}, {})。"
+                         "权重文件里应该是 HuggingFace Conv1D 的 (in, out) 布局，加载时才转成 (out, in)。",
+                         3 * C, C, m.layers_[0].attn_w.dim(0), m.layers_[0].attn_w.dim(1)));
     }
     return m;
 }
@@ -315,12 +339,12 @@ Tensor GPT::forward_impl(std::span<const int> tokens, int start_pos, KVCache *ca
             h = ops::layernorm(x, L.ln1_w, L.ln1_b);
         }
 
-        // 一次矩阵乘同时算出 Q、K、V：权重 [C, 3C] 是三个 [C, C] 拼起来的。
+        // 一次矩阵乘同时算出 Q、K、V：权重 [3C, C] 是三个 [C, C] 上下拼起来的。
         // 合并成一次比分三次快 —— 大矩阵乘的访存效率更高。
         Tensor qkv;
         {
             ScopedTimer tm(slot(&OpProfile::qkv));
-            qkv = ops::affine(h, L.attn_w, L.attn_b); // [T, 3C]
+            qkv = ops::linear(h, L.attn_w, L.attn_b); // [T, 3C]
         }
 
         Tensor q, k, v;
@@ -356,7 +380,7 @@ Tensor GPT::forward_impl(std::span<const int> tokens, int start_pos, KVCache *ca
 
         {
             ScopedTimer tm(slot(&OpProfile::attn_proj));
-            y = ops::affine(y, L.attn_proj_w, L.attn_proj_b);
+            y = ops::linear(y, L.attn_proj_w, L.attn_proj_b);
         }
         {
             ScopedTimer tm(slot(&OpProfile::residual));
@@ -374,7 +398,7 @@ Tensor GPT::forward_impl(std::span<const int> tokens, int start_pos, KVCache *ca
         }
         {
             ScopedTimer tm(slot(&OpProfile::mlp_fc));
-            h = ops::affine(h, L.fc_w, L.fc_b);
+            h = ops::linear(h, L.fc_w, L.fc_b);
         }
         {
             ScopedTimer tm(slot(&OpProfile::gelu));
@@ -382,7 +406,7 @@ Tensor GPT::forward_impl(std::span<const int> tokens, int start_pos, KVCache *ca
         }
         {
             ScopedTimer tm(slot(&OpProfile::mlp_proj));
-            h = ops::affine(h, L.proj_w, L.proj_b);
+            h = ops::linear(h, L.proj_w, L.proj_b);
         }
         {
             ScopedTimer tm(slot(&OpProfile::residual));
