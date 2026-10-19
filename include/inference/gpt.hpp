@@ -132,6 +132,30 @@ class Sampler
     float next_uniform();
 };
 
+// 按算子类别累加的耗时（毫秒）。优化的第一步永远是测量：先知道时间花在哪。
+struct OpProfile
+{
+    double embed = 0;
+    double layernorm = 0;
+    double qkv = 0;       // c_attn 矩阵乘
+    double copy = 0;      // 拆 q/k/v、写 KV-Cache、把 cache 拷出来
+    double attention = 0; // 注意力核心（QKᵀ、softmax、×V）
+    double attn_proj = 0;
+    double residual = 0;
+    double mlp_fc = 0;
+    double gelu = 0;
+    double mlp_proj = 0;
+    double lm_head = 0;
+    double sample = 0;
+    int forwards = 0; // forward_impl 被调用的次数
+
+    double total() const noexcept
+    {
+        return embed + layernorm + qkv + copy + attention + attn_proj + residual + mlp_fc + gelu +
+               mlp_proj + lm_head + sample;
+    }
+};
+
 class GPT
 {
   public:
@@ -155,6 +179,8 @@ class GPT
         double prefill_ms = 0;
         double decode_ms = 0;
         int generated = 0;
+        OpProfile prefill_ops;
+        OpProfile decode_ops;
     };
 
     std::vector<int> generate(std::span<const int> prompt, int max_new_tokens, Sampler &sampler,
@@ -185,6 +211,7 @@ class GPT
     };
     std::vector<Layer> layers_;
     Tensor wte_, wpe_, lnf_w_, lnf_b_;
+    OpProfile *profile_ = nullptr; // 非空时 forward_impl 把各算子耗时累加进去
     // forward / forward_one / forward_trace 全都走这一个实现，区别只在参数：
     //   cache == nullptr → 不用缓存，从头算整段
     //   cache != nullptr → 读写缓存，只算新来的这几个 token

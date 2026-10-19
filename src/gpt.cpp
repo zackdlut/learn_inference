@@ -27,6 +27,28 @@ double ms_since(Clock::time_point t0)
     return std::chrono::duration<double, std::milli>(Clock::now() - t0).count();
 }
 
+// 作用域结束时把耗时加到 *acc 上。acc 为空时什么都不做，不测量就几乎零开销。
+class ScopedTimer
+{
+  public:
+    explicit ScopedTimer(double *acc) : acc_(acc)
+    {
+        if (acc_)
+            t0_ = Clock::now();
+    }
+    ~ScopedTimer()
+    {
+        if (acc_)
+            *acc_ += ms_since(t0_);
+    }
+    ScopedTimer(const ScopedTimer &) = delete;
+    ScopedTimer &operator=(const ScopedTimer &) = delete;
+
+  private:
+    double *acc_;
+    Clock::time_point t0_{};
+};
+
 } // namespace
 
 // ---------------------------------------------------------------------------
@@ -257,8 +279,15 @@ Tensor GPT::forward_impl(std::span<const int> tokens, int start_pos, KVCache *ca
     // 第 p 行就是「第 p 个位置」的向量，直接加到词向量上。
     // 这也是 GPT-2 最多只能处理 1024 个 token 的原因 —— 表就这么大。
     // （后来的模型改用 RoPE 等相对位置编码，就没这个硬上限了。）
-    Tensor x = ops::embedding(wte_, tokens);
+    OpProfile *const prof = profile_;
+    if (prof)
+        ++prof->forwards;
+    auto slot = [prof](double OpProfile::*field) { return prof ? &(prof->*field) : nullptr; };
+
+    Tensor x;
     {
+        ScopedTimer tm(slot(&OpProfile::embed));
+        x = ops::embedding(wte_, tokens);
         std::span<float> xv = x.data();
         std::span<const float> pe = wpe_.data();
         for (int64 t = 0; t < T; ++t)
@@ -280,54 +309,98 @@ Tensor GPT::forward_impl(std::span<const int> tokens, int start_pos, KVCache *ca
         // ---- 注意力子层 ----
         // 注意 LayerNorm 在**进入**子层前做（pre-norm）。原版 Transformer 是
         // 做完子层再 norm（post-norm），GPT-2 改成了 pre-norm，训练更稳。
-        Tensor h = ops::layernorm(x, L.ln1_w, L.ln1_b);
+        Tensor h;
+        {
+            ScopedTimer tm(slot(&OpProfile::layernorm));
+            h = ops::layernorm(x, L.ln1_w, L.ln1_b);
+        }
 
         // 一次矩阵乘同时算出 Q、K、V：权重 [C, 3C] 是三个 [C, C] 拼起来的。
         // 合并成一次比分三次快 —— 大矩阵乘的访存效率更高。
-        Tensor qkv = ops::affine(h, L.attn_w, L.attn_b); // [T, 3C]
-        Tensor q = qkv.slice(1, 0, C).contiguous();
-        Tensor k = qkv.slice(1, C, 2 * C).contiguous();
-        Tensor v = qkv.slice(1, 2 * C, 3 * C).contiguous();
+        Tensor qkv;
+        {
+            ScopedTimer tm(slot(&OpProfile::qkv));
+            qkv = ops::affine(h, L.attn_w, L.attn_b); // [T, 3C]
+        }
+
+        Tensor q, k, v;
+        {
+            ScopedTimer tm(slot(&OpProfile::copy));
+            q = qkv.slice(1, 0, C).contiguous();
+            k = qkv.slice(1, C, 2 * C).contiguous();
+            v = qkv.slice(1, 2 * C, 3 * C).contiguous();
+        }
 
         Tensor y;
         if (cache)
         {
             // 新算出的 K/V 存进缓存，然后拿**全部历史** K/V 做注意力。
             // q_offset = start_pos 告诉 kernel：我这批 query 的绝对位置从哪开始。
-            cache->append(li, start_pos, k.data(), v.data());
-            Tensor ck = Tensor::zeros({cache->length(), C});
-            Tensor cv = Tensor::zeros({cache->length(), C});
-            std::ranges::copy(cache->keys(li), ck.data().begin());
-            std::ranges::copy(cache->values(li), cv.data().begin());
+            Tensor ck, cv;
+            {
+                ScopedTimer tm(slot(&OpProfile::copy));
+                cache->append(li, start_pos, k.data(), v.data());
+                ck = Tensor::zeros({cache->length(), C});
+                cv = Tensor::zeros({cache->length(), C});
+                std::ranges::copy(cache->keys(li), ck.data().begin());
+                std::ranges::copy(cache->values(li), cv.data().begin());
+            }
+            ScopedTimer tm(slot(&OpProfile::attention));
             y = ops::attention(q, ck, cv, cfg_.n_head, start_pos);
         }
         else
         {
+            ScopedTimer tm(slot(&OpProfile::attention));
             y = ops::attention(q, k, v, cfg_.n_head, start_pos);
         }
 
-        y = ops::affine(y, L.attn_proj_w, L.attn_proj_b);
-        x = ops::add(x, y); // 残差连接
+        {
+            ScopedTimer tm(slot(&OpProfile::attn_proj));
+            y = ops::affine(y, L.attn_proj_w, L.attn_proj_b);
+        }
+        {
+            ScopedTimer tm(slot(&OpProfile::residual));
+            x = ops::add(x, y); // 残差连接
+        }
         if (trace && li == 0)
             trace->l0_attn_out = x;
 
         // ---- MLP 子层 ----
         // 先升维到 4C（3072）再降回来。这一段占了模型 2/3 的计算量，
         // 一般认为它是模型「存事实知识」的地方。
-        h = ops::layernorm(x, L.ln2_w, L.ln2_b);
-        h = ops::affine(h, L.fc_w, L.fc_b);
-        h = ops::gelu(h);
-        h = ops::affine(h, L.proj_w, L.proj_b);
-        x = ops::add(x, h); // 残差连接
+        {
+            ScopedTimer tm(slot(&OpProfile::layernorm));
+            h = ops::layernorm(x, L.ln2_w, L.ln2_b);
+        }
+        {
+            ScopedTimer tm(slot(&OpProfile::mlp_fc));
+            h = ops::affine(h, L.fc_w, L.fc_b);
+        }
+        {
+            ScopedTimer tm(slot(&OpProfile::gelu));
+            h = ops::gelu(h);
+        }
+        {
+            ScopedTimer tm(slot(&OpProfile::mlp_proj));
+            h = ops::affine(h, L.proj_w, L.proj_b);
+        }
+        {
+            ScopedTimer tm(slot(&OpProfile::residual));
+            x = ops::add(x, h); // 残差连接
+        }
         if (trace && li == 0)
             trace->l0_out = x;
     }
 
     // --- 3. 最后的 LayerNorm + 输出投影 ---
-    x = ops::layernorm(x, lnf_w_, lnf_b_);
+    {
+        ScopedTimer tm(slot(&OpProfile::layernorm));
+        x = ops::layernorm(x, lnf_w_, lnf_b_);
+    }
     if (trace)
         trace->final_norm = x;
 
+    ScopedTimer tm(slot(&OpProfile::lm_head));
     // 只要最后一个位置的 logits 时，别把 T×50257 全算出来。
     // T=5 时这一步能省 80% 的输出层计算；prompt 越长省得越多。
     if (last_only && T > 1)
@@ -384,15 +457,30 @@ std::vector<int> GPT::generate(std::span<const int> prompt, int max_new_tokens, 
     const int budget = std::min(max_new_tokens, cfg_.n_ctx - static_cast<int>(prompt.size()));
     KVCache cache(cfg_, static_cast<int>(prompt.size()) + std::max(budget, 0));
 
+    struct ProfileReset
+    {
+        OpProfile *&p;
+        ~ProfileReset() { p = nullptr; }
+    } profile_reset{profile_};
+    OpProfile *const prefill_prof = stats ? &stats->prefill_ops : nullptr;
+    OpProfile *const decode_prof = stats ? &stats->decode_ops : nullptr;
+    auto timed_sample = [&](const Tensor &lg, OpProfile *prof)
+    {
+        ScopedTimer tm(prof ? &prof->sample : nullptr);
+        return sampler.sample(lg.data());
+    };
+
     // --- prefill ---
+    profile_ = prefill_prof;
     const auto t0 = Clock::now();
     Tensor logits = forward_impl(prompt, 0, &cache, nullptr, /*last_only=*/true);
     const double prefill_ms = ms_since(t0);
 
     std::vector<int> out(prompt.begin(), prompt.end());
-    int next = sampler.sample(logits.data());
+    int next = timed_sample(logits, prefill_prof);
 
     // --- decode ---
+    profile_ = decode_prof;
     const auto t1 = Clock::now();
     int generated = 0;
     for (int i = 0; i < budget; ++i)
@@ -405,7 +493,7 @@ std::vector<int> GPT::generate(std::span<const int> prompt, int max_new_tokens, 
             break;
         const int pos = static_cast<int>(out.size()) - 1;
         logits = forward_one(next, pos, cache);
-        next = sampler.sample(logits.data());
+        next = timed_sample(logits, decode_prof);
     }
 
     if (stats)

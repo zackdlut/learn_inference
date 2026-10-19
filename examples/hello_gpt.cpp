@@ -56,6 +56,49 @@ std::string show(const std::string &s)
     return out;
 }
 
+// 分算子耗时表。矩阵乘那几行额外给出「有效带宽」= 权重字节数 / 耗时：
+// decode 是访存密集的，这个数离机器的内存带宽上限越近，说明内核越接近最优。
+void print_profile(const char *title, const inference::OpProfile &p,
+                   const inference::GPTConfig &cfg)
+{
+    if (p.forwards == 0)
+        return;
+    const double L = cfg.n_layer, C = cfg.n_embd, V = cfg.n_vocab;
+    const double n = p.forwards;
+    struct Row
+    {
+        const char *name;
+        double ms;
+        double weight_bytes; // 每次 forward 读的权重字节数，0 表示不是矩阵乘
+    };
+    const Row rows[] = {
+        {"embed", p.embed, 0},
+        {"layernorm", p.layernorm, 0},
+        {"qkv (c_attn)", p.qkv, L * C * 3 * C * 4},
+        {"copy (split/kv)", p.copy, 0},
+        {"attention", p.attention, 0},
+        {"attn_proj", p.attn_proj, L * C * C * 4},
+        {"residual add", p.residual, 0},
+        {"mlp_fc", p.mlp_fc, L * C * 4 * C * 4},
+        {"gelu", p.gelu, 0},
+        {"mlp_proj", p.mlp_proj, L * 4 * C * C * 4},
+        {"lm_head", p.lm_head, V * C * 4},
+        {"sample", p.sample, 0},
+    };
+    const double total = p.total();
+    println("\n{}（{} 次 forward，每次平均）:", title, p.forwards);
+    println("  {:<16}{:>10}{:>8}{:>12}", "算子", "ms", "占比", "有效带宽");
+    for (const auto &r : rows)
+    {
+        const std::string bw =
+            r.weight_bytes > 0 && r.ms > 0
+                ? std::format("{:.1f} GB/s", r.weight_bytes * n / (r.ms * 1e6))
+                : "";
+        println("  {:<16}{:>10.3f}{:>7.1f}%{:>12}", r.name, r.ms / n, r.ms / total * 100.0, bw);
+    }
+    println("  {:<16}{:>10.3f}", "合计", total / n);
+}
+
 int main(int argc, char **argv)
 {
     const std::string dir = INFER_MODEL_GPT_DIR;
@@ -229,6 +272,8 @@ int main(int argc, char **argv)
                     static_cast<double>(ids.size()) / st.prefill_ms * 1000.0);
             println("decode {} 个 token:  {:.0f} ms  （{:.1f} token/s）", st.generated,
                     st.decode_ms, static_cast<double>(st.generated) / st.decode_ms * 1000.0);
+            print_profile("prefill 分算子耗时", st.prefill_ops, cfg);
+            print_profile("decode 分算子耗时", st.decode_ops, cfg);
             println("\nprefill 是计算密集的（大矩阵乘），decode 是访存密集的：");
             println("每生成一个词，都要把 500 MB 权重完整读一遍。这就是为什么");
             println("大模型推理的瓶颈通常是内存带宽，而不是算力 —— 也是量化（阶段 7）的动机。");
