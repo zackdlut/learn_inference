@@ -169,9 +169,63 @@ TEST(kernel_attention_strided_matches_contiguous)
         }
     std::vector<float> ref(T * C), got(T * C);
     kernel::attention_f32(q, k, v, ref, T, T, n_head, hs, 0);
-    kernel::attention_f32_strided(qkv.data(), 3 * C, qkv.data() + C, 3 * C, qkv.data() + 2 * C,
-                                  3 * C, got.data(), C, T, T, n_head, hs, 0);
+    kernel::attention_f32_strided({qkv.data(), 3 * C, hs}, {qkv.data() + C, 3 * C, hs},
+                                  {qkv.data() + 2 * C, 3 * C, hs}, got.data(), C, T, T, n_head,
+                                  hs, 0);
     CHECK(got == ref);
+
+    // K/V 换成按头存放 [头][位置][hs]（KV-Cache 的布局），结果也必须一致
+    constexpr int64 cap = 11; // 容量比 T 大，验证 head_stride 用的是容量而不是长度
+    std::vector<float> kh(n_head * cap * hs), vh(n_head * cap * hs);
+    for (int64 t = 0; t < T; ++t)
+        for (int64 h = 0; h < n_head; ++h)
+            for (int64 d = 0; d < hs; ++d)
+            {
+                kh[(h * cap + t) * hs + d] = k[t * C + h * hs + d];
+                vh[(h * cap + t) * hs + d] = v[t * C + h * hs + d];
+            }
+    std::vector<float> got2(T * C);
+    kernel::attention_f32_strided({q.data(), C, hs}, {kh.data(), hs, cap * hs},
+                                  {vh.data(), hs, cap * hs}, got2.data(), C, T, T, n_head, hs, 0);
+    CHECK(got2 == ref);
+}
+
+TEST(kernel_attention_fast_matches_naive)
+{
+    // 覆盖：decode（Tq=1，q_offset=Tk-1）、prefill（Tq=Tk，q_offset=0）、
+    // 分段 prefill（Tq<Tk）；head_size 是 64 / 8 / 非 8 倍数；Tk 跨过并行阈值；1 线程和多线程
+    struct Case
+    {
+        int64 Tq, Tk, n_head, hs, q_offset;
+    };
+    const std::vector<Case> cases = {
+        {1, 1, 1, 8, 0},     {1, 5, 2, 8, 4},      {1, 65, 12, 64, 64}, {1, 300, 12, 64, 299},
+        {5, 5, 12, 64, 0},   {7, 7, 3, 12, 0},     {4, 20, 2, 64, 16},  {33, 33, 12, 64, 0},
+        {1, 1024, 12, 64, 1023}, {3, 17, 5, 13, 14},
+    };
+    const int saved = kernel::get_num_threads();
+    for (const int nt : {1, 4})
+    {
+        kernel::set_num_threads(nt);
+        unsigned seed = 3000;
+        for (const auto &c : cases)
+        {
+            const int64 C = c.n_head * c.hs;
+            const auto q = random_vec(static_cast<std::size_t>(c.Tq * C), seed++);
+            const auto k = random_vec(static_cast<std::size_t>(c.Tk * C), seed++);
+            const auto v = random_vec(static_cast<std::size_t>(c.Tk * C), seed++);
+            std::vector<float> ref(static_cast<std::size_t>(c.Tq * C));
+            std::vector<float> got(ref.size(), std::numeric_limits<float>::quiet_NaN());
+            kernel::attention_f32_naive(q, k, v, ref, c.Tq, c.Tk, c.n_head, c.hs, c.q_offset);
+            kernel::attention_f32(q, k, v, got, c.Tq, c.Tk, c.n_head, c.hs, c.q_offset);
+            const float diff = max_abs_diff(got, ref);
+            if (!(diff < 1e-5F))
+                throw minitest::failure(std::format("threads={} Tq={} Tk={} hs={} 误差 {}", nt, c.Tq,
+                                                    c.Tk, c.hs, diff));
+        }
+    }
+    kernel::set_num_threads(saved);
+    PRINT("SIMD + 并行注意力：{} 个形状 × 2 种线程数都和朴素版一致", cases.size());
 }
 
 // ---------------------------------------------------------------------------

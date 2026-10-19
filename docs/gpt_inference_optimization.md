@@ -561,6 +561,77 @@ T=1024 时约 75 MB，和权重同一量级。
 
 验证方法：生成 500 个 token，画出「每 token 耗时 vs 位置」的曲线，优化前应该明显上升，优化后应该很平。
 
+**已实现**：
+
+- `kernel_attention.cpp`：原来的标量版改名为 `attention_f32_naive`，留作参考实现。
+  新的快速版对每个 (头, 查询) 任务做：AVX2 点积（2 个累加器）→ AVX2 softmax
+  （max / exp / 求和 / 缩放都 8 个一组，exp 复用 `simd::exp256_ps`）→ AVX2 axpy 累加 V。
+  分数缓冲区是 `thread_local`，热路径上不分配内存
+- 并行：n_head × Tq 个任务交给线程池（新增 `kernel::parallel_for`）。
+  总工作量 n_head × Tq × Tk × head_size < 30 万时串行
+- `src/simd_math.hpp`：kernel 内部共用的 `exp256_ps` / `hsum256_ps` / `hmax256_ps`
+- **KV-Cache 改成按头存放** `[n_head][capacity][head_size]`（原来是 `[capacity][n_embd]`）。
+  注意力接口改成 `kernel::HeadView{data, row_stride, head_stride}`，一套 kernel 同时支持
+  qkv 里的 q/k/v 段、连续 `[T, C]` 和按头存放的缓存。`KVCache::append_strided` 直接从 qkv 的
+  k/v 段（行距 3C）写进缓存
+- 测试：`kernel_attention_fast_matches_naive`（10 个形状 × 1/4 线程，含 decode / prefill /
+  分段 prefill、head_size 非 8 的倍数、Tk = 1024），`kernel_attention_strided_matches_contiguous`
+  增加按头布局的校验
+
+**实测 1：注意力 kernel 本身**（`/tmp/bench_attn.cpp`，热缓存，每层一次，µs）：
+
+```
+形状              朴素      SIMD 1线程   SIMD 7线程
+decode Tk=64      19.4      9.3          8.4        （低于阈值，走串行）
+decode Tk=256     83.7      41.4         37.4       （低于阈值，走串行）
+decode Tk=512     225.7     111.3        93.9
+decode Tk=1024    741.6     404.3        257.7      2.9×
+prefill T=128     4511      1993         642        7.0×
+prefill T=512     83489     33408        7976       10.5×
+```
+
+- SIMD 只带来 **~2×**，不是 8×。短序列时每个 key 只有 4 次 FMA，之后的水平求和（8→1）
+  有 ~10 条指令的依赖链，成了瓶颈；长序列时每层要读 6 MB 的 K/V，受带宽限制。
+  想更快可以一次算 8 个 key 的点积，最后用转置做归约 —— 留作练习
+- 并行在 prefill 上收益最大（12 × T 个任务，能喂饱所有线程）
+
+**踩坑：并行阈值**。第一版阈值是 6.5 万（decode 的 Tk ≈ 85），结果 decode Tk=256 时
+7 线程（45 µs）比单线程（39 µs）还慢：12 个头分给 7 个线程要跑两轮，每个任务才 3 µs，
+同步开销占了大头。又在冷缓存下扫了一遍（强制总是并行）：
+
+```
+Tk            32     64     128    256    384    512    1024
+1 线程 ms     0.16   0.31   0.70   1.24   2.79   4.28   8.10     （12 层合计，按头布局）
+7 线程 ms     0.27   0.46   0.87   1.87   2.50   1.45   2.98
+```
+
+交叉点在 Tk ≈ 384~512，阈值定为 30 万（≈ decode 的 Tk 390）。
+
+**实测 2：KV-Cache 布局**。端到端生成 900 个 token 时，注意力平均每 token 4.5 ms、占 16.7%，
+但按 microbenchmark 推算只该 ~1.5 ms。差别在于 microbenchmark 反复读同一块数据（热在 L3 里），
+真实模型每 token 要读 12 层共 ~33 MB 的 KV-Cache（冷的）。按位置存放时，一个头的 64 个数
+夹在每行 768 个数中间，每隔 3 KB 跳着取 256 字节，硬件预取器跟不上。
+
+冷缓存对比（`/tmp/bench_kvlayout.cpp`：12 层各一份 K/V，总量 150 MB，远超 12 MB 的 L3，
+同一进程交替运行，ms / token）：
+
+```
+                     [位置][C]   [头][位置][64]
+1 线程   Tk=512      26.9        12.7          2.1×
+1 线程   Tk=1024     39.8        21.7          1.8×
+7 线程   Tk=512      6.7         3.2           2.1×
+7 线程   Tk=1024     11.9        6.3           1.9×
+```
+
+端到端 900 token：注意力占比 16.7% → 10.8–12.2%。这一轮机器降频严重，绝对值不可比，
+用同一次运行里的 `mlp_fc` 做参照：注意力 / mlp_fc 从 0.93 降到 0.55–0.59，约快 1.6×。
+
+**教训**：microbenchmark 的数据如果一直热在缓存里，会掩盖真实场景的访存问题。
+测访存相关的优化时，要构造比 L3 大的数据集。
+
+**实测 3：端到端 60 token**（7 线程，这一轮机器较凉）：decode 15.6–21 ms/token
+（48–65 token/s），prefill 25–28 ms（~200 token/s），注意力 0.37–0.54 ms（第 4 步 0.86 ms）。
+
 ### 第 6 步：prefill 的小 M 问题
 
 prefill 的矩阵乘 M = prompt 长度。按 1.3 节的分析：
@@ -647,6 +718,6 @@ g++ -std=c++20 -O3 -march=native /tmp/bench_bw.cpp -o /tmp/bench_bw
 | 2 GEMV + 权重转成 [out, in] | 78–107 ms | 44.9 | 22.6 | 有效带宽 ~12 GB/s，接近单线程上限 |
 | 3 多线程 + 线程池 | 35–51 ms | 19.4–22 | ~45 | 7 线程；矩阵乘 ~30 GB/s；14 线程反而更慢 |
 | 4 去拷贝 + 工作区 + SIMD gelu | 35–50 ms | 19.1（中位） | ~52 | 与第 3 步交替 A/B：23.4 → 19.1；串行部分 3.5 → 1.2 ms |
-| 5 注意力 | | | | |
+| 5 注意力 SIMD + 并行 + KV 按头存放 | 25–28 ms | 15.6–21 | 48–65 | 900 token 时注意力占比 16.7% → ~11% |
 | 6 prefill 小 M | | | | |
 | 7 量化 Q8_0 | | | | |

@@ -131,8 +131,8 @@ KVCache::KVCache(const GPTConfig &cfg, int max_len)
     v_.reserve(static_cast<std::size_t>(cfg.n_layer));
     for (int i = 0; i < cfg.n_layer; ++i)
     {
-        k_.push_back(Tensor::zeros({max_len_, cfg.n_embd}));
-        v_.push_back(Tensor::zeros({max_len_, cfg.n_embd}));
+        k_.push_back(Tensor::zeros({cfg.n_head, max_len_, cfg.head_size()}));
+        v_.push_back(Tensor::zeros({cfg.n_head, max_len_, cfg.head_size()}));
     }
 }
 
@@ -143,27 +143,45 @@ void KVCache::append(int layer, int pos, std::span<const float> k, std::span<con
     {
         fail("KVCache::append: K/V 长度必须相等且是 n_embd 的整数倍");
     }
-    const auto n_new = static_cast<int>(k.size() / C);
-    if (pos < 0 || pos + n_new > max_len_)
+    append_strided(layer, pos, k.data(), v.data(), static_cast<int>(k.size() / C), cfg_.n_embd);
+}
+
+void KVCache::append_strided(int layer, int pos, const float *k, const float *v, int n_rows,
+                             std::int64_t row_stride)
+{
+    if (pos < 0 || pos + n_rows > max_len_)
     {
         fail(std::format("KVCache 装不下了：想写到位置 {}，容量只有 {}。"
                          "GPT-2 的上下文上限是 {} 个 token。",
-                         pos + n_new, max_len_, cfg_.n_ctx));
+                         pos + n_rows, max_len_, cfg_.n_ctx));
     }
-    const auto off = static_cast<std::ptrdiff_t>(pos) * static_cast<std::ptrdiff_t>(C);
-    std::ranges::copy(k, k_[static_cast<std::size_t>(layer)].data().begin() + off);
-    std::ranges::copy(v, v_[static_cast<std::size_t>(layer)].data().begin() + off);
-    len_ = std::max(len_, pos + n_new);
+    // 输入是按位置排的 [n_rows][n_embd]，缓存是按头排的 [n_head][capacity][head_size]：
+    // 每行切成 n_head 段，各自放到对应头的第 pos + r 个位置
+    const std::int64_t hs = cfg_.head_size();
+    const std::int64_t hstride = head_stride();
+    float *kd = k_[static_cast<std::size_t>(layer)].data().data();
+    float *vd = v_[static_cast<std::size_t>(layer)].data().data();
+    for (int r = 0; r < n_rows; ++r)
+    {
+        const float *krow = k + r * row_stride;
+        const float *vrow = v + r * row_stride;
+        for (int h = 0; h < cfg_.n_head; ++h)
+        {
+            const std::int64_t dst = h * hstride + (pos + r) * hs;
+            std::copy_n(krow + h * hs, hs, kd + dst);
+            std::copy_n(vrow + h * hs, hs, vd + dst);
+        }
+    }
+    len_ = std::max(len_, pos + n_rows);
 }
+
 std::span<const float> KVCache::keys(int layer) const
 {
-    return k_[static_cast<std::size_t>(layer)].data().subspan(
-        0, static_cast<std::size_t>(len_) * static_cast<std::size_t>(cfg_.n_embd));
+    return k_[static_cast<std::size_t>(layer)].data();
 }
 std::span<const float> KVCache::values(int layer) const
 {
-    return v_[static_cast<std::size_t>(layer)].data().subspan(
-        0, static_cast<std::size_t>(len_) * static_cast<std::size_t>(cfg_.n_embd));
+    return v_[static_cast<std::size_t>(layer)].data();
 }
 
 std::size_t KVCache::bytes() const noexcept
@@ -407,10 +425,10 @@ Tensor GPT::forward_impl(std::span<const int> tokens, int start_pos, KVCache *ca
             linear_bias(h, L.attn_w, L.attn_b, qkv, T, C3, C);
         }
 
-        // k/v 从哪读：用 cache 时读缓存里的全部历史，不用时直接读 qkv
-        const float *k_src = qkv + C;
-        const float *v_src = qkv + 2 * C;
-        int64 ld_kv = C3;
+        // k/v 从哪读：不用 cache 时直接读 qkv 里的 k/v 段（行距 3C），
+        // 用 cache 时读缓存里的全部历史（按头存放，见 KVCache）
+        kernel::HeadView kv_k{qkv + C, C3, hs};
+        kernel::HeadView kv_v{qkv + 2 * C, C3, hs};
         int64 Tk = T;
         if (cache)
         {
@@ -418,23 +436,16 @@ Tensor GPT::forward_impl(std::span<const int> tokens, int start_pos, KVCache *ca
             // 注意力直接读缓存本身 —— 以前这里每层都把整段缓存拷出来一份，
             // 生成第 n 个 token 时要拷 n 行，KV-Cache 想省掉的 O(n) 又被加了回来。
             ScopedTimer tm(slot(&OpProfile::copy));
-            for (int64 t = 0; t < T; ++t)
-            {
-                const float *row = qkv + t * C3;
-                cache->append(li, start_pos + static_cast<int>(t),
-                              {row + C, static_cast<std::size_t>(C)},
-                              {row + 2 * C, static_cast<std::size_t>(C)});
-            }
-            k_src = cache->keys(li).data();
-            v_src = cache->values(li).data();
-            ld_kv = C;
+            cache->append_strided(li, start_pos, qkv + C, qkv + 2 * C, static_cast<int>(T), C3);
+            kv_k = {cache->keys(li).data(), hs, cache->head_stride()};
+            kv_v = {cache->values(li).data(), hs, cache->head_stride()};
             Tk = cache->length();
         }
         {
             // q_offset = start_pos 告诉 kernel：这批 query 的绝对位置从哪开始
             ScopedTimer tm(slot(&OpProfile::attention));
-            kernel::attention_f32_strided(qkv, C3, k_src, ld_kv, v_src, ld_kv, att, C, T, Tk, H,
-                                          hs, start_pos);
+            kernel::attention_f32_strided({qkv, C3, hs}, kv_k, kv_v, att, C, T, Tk, H, hs,
+                                          start_pos);
         }
 
         {

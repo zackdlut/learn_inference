@@ -252,6 +252,17 @@ template <class F> void parallel_rows(int64 total_rows, int64 work, F &&fn)
                         });
 }
 
+void parallel_for(int64 n_tasks, const std::function<void(int64)> &fn)
+{
+    if (get_num_threads() <= 1)
+    {
+        for (int64 i = 0; i < n_tasks; ++i)
+            fn(i);
+        return;
+    }
+    pool().parallel_for(n_tasks, fn);
+}
+
 bool has_avx2_support() noexcept
 {
     return INFER_HAS_AVX2 != 0;

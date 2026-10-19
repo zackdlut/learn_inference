@@ -94,12 +94,26 @@ class KVCache
     // 把若干行 K/V 写进第 layer 层缓存的 [pos, pos + k.size()/n_embd) 位置。
     // prefill 时一次写整段，decode 时一次写一行，走的是同一个函数。
     void append(int layer, int pos, std::span<const float> k, std::span<const float> v);
+    // 同上，但输入第 r 行从 k[r * row_stride] 开始（长 n_embd），共 n_rows 行。
+    // 这样可以直接传 c_attn 输出 [T, 3C] 里的 k/v 段（行距 3C），不用先拆出来。
+    void append_strided(int layer, int pos, const float *k, const float *v, int n_rows,
+                        std::int64_t row_stride);
     void set_length(int n) noexcept
     {
         len_ = n;
     }
+    // 第 layer 层的整块缓存，按头存放：[n_head][capacity][head_size]。
+    // 第 h 个头、第 t 个位置的向量从 h * head_stride() + t * head_size 开始。
+    //
+    // 为什么不按位置存 [capacity][n_embd]：注意力是一个头一个头算的。按位置存时，
+    // 一个头的 64 个数夹在每行 768 个数中间，读一个头要每隔 3 KB 跳着取 256 字节，
+    // 硬件预取器跟不上；按头存时一个头的全部历史是一整段连续内存。
     std::span<const float> keys(int layer) const;
     std::span<const float> values(int layer) const;
+    std::int64_t head_stride() const noexcept
+    {
+        return static_cast<std::int64_t>(max_len_) * cfg_.head_size();
+    }
     std::size_t bytes() const noexcept;
 
   private:

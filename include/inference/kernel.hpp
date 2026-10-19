@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <span>
 
 namespace inference::kernel
@@ -91,17 +92,36 @@ void attention_f32(std::span<const float> q, std::span<const float> k, std::span
                    std::span<float> out, int64 Tq, int64 Tk, int64 n_head, int64 head_size,
                    int64 q_offset);
 
-// 同上，但每个矩阵可以有自己的行距（第 t 行从 ptr + t * ld 开始）。
-// 这样 q/k/v 可以直接指向 c_attn 输出 [T, 3C] 里的三段（ld = 3C），
-// 或者直接读 KV-Cache，都不用先拷成连续的 [T, C]。
-void attention_f32_strided(const float *q, int64 ldq, const float *k, int64 ldk, const float *v,
-                           int64 ldv, float *out, int64 ldo, int64 Tq, int64 Tk, int64 n_head,
-                           int64 head_size, int64 q_offset);
+// 朴素版：三重标量循环、单线程。只用作参考实现（测试对拍、benchmark 对比）
+void attention_f32_naive(std::span<const float> q, std::span<const float> k,
+                         std::span<const float> v, std::span<float> out, int64 Tq, int64 Tk,
+                         int64 n_head, int64 head_size, int64 q_offset);
+
+// 按「头」切分的矩阵视图：第 h 个头、第 t 行的 head_size 个数从
+//   data + h * head_stride + t * row_stride
+// 开始。用两个跨度就能描述注意力里出现的所有布局，都不用先拷成连续的 [T, C]：
+//   c_attn 输出 [T, 3C] 里的 q 段     row_stride = 3C, head_stride = head_size
+//   连续的 [T, C]                      row_stride = C,  head_stride = head_size
+//   KV-Cache [头][位置][head_size]     row_stride = head_size, head_stride = 容量 × head_size
+struct HeadView
+{
+    const float *data;
+    int64 row_stride;
+    int64 head_stride;
+};
+
+// 同 attention_f32，但 q/k/v 用 HeadView 描述；out 是 [Tq, C] 布局，行距 ldo
+void attention_f32_strided(HeadView q, HeadView k, HeadView v, float *out, int64 ldo, int64 Tq,
+                           int64 Tk, int64 n_head, int64 head_size, int64 q_offset);
 
 // 运行期查询本次构建是否带 AVX2（-march=native 关掉时会回退到标量版）
 bool has_avx2_support() noexcept;
 // 多线程用几个线程。默认取硬件并发数，设成 1 就等于串行。
 void set_num_threads(int n) noexcept;
 int get_num_threads() noexcept;
+
+// 用全局线程池对 i = 0..n_tasks-1 各执行一次 fn(i)，全部完成后返回。
+// 任务之间必须互不干扰（写不同的内存），任务函数不能抛异常。
+void parallel_for(int64 n_tasks, const std::function<void(int64)> &fn);
 
 } // namespace inference::kernel
