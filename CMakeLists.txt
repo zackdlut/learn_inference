@@ -42,6 +42,7 @@ add_library(inference SHARED
     src/kernel.cpp
     src/kernel_matmul.cpp
     src/kernel_attention.cpp
+    src/kernel_quant.cpp
     src/thread_pool.cpp
     src/tokenizer.cpp
     src/gpt.cpp
@@ -56,6 +57,8 @@ target_link_libraries(inference PUBLIC inference_flags)
 # 代码示例
 add_subdirectory(examples)
 add_subdirectory(misc)
+# 性能实验（docs/gpt_inference_optimization.md 的测量程序）
+add_subdirectory(bench)
 
 # 测试用例
 # 必须在 enable_testing() 之前：`make test` 会把这些参数传给 ctest。

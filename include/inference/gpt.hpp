@@ -1,7 +1,9 @@
 #pragma once
 #include "inference/model_file.hpp"
 #include "inference/tensor.hpp"
+#include <cstdint>
 #include <functional>
+#include <vector>
 
 namespace inference
 {
@@ -170,10 +172,65 @@ struct OpProfile
     }
 };
 
+// Q8_0 量化后的矩阵 [rows, cols]：每行每 32 个数一组，q 存 int8，scale 存每组的缩放系数
+struct QMatrixQ8
+{
+    std::int64_t rows = 0;
+    std::int64_t cols = 0;
+    std::vector<std::int8_t> q;  // rows × cols
+    std::vector<float> scale;    // rows × cols / 32
+
+    static QMatrixQ8 quantize(const Tensor &w); // w 是连续的 [rows, cols]，cols 是 32 的倍数
+    bool empty() const noexcept
+    {
+        return q.empty();
+    }
+    std::size_t bytes() const noexcept
+    {
+        return q.size() + scale.size() * sizeof(float);
+    }
+};
+
+// 量化哪些矩阵、用什么格式。默认值就是 quantize_q8_0() 采用的方案；
+// 其它组合用来做实验（bench/bench_quant.cpp 逐个矩阵排查精度损失）。
+struct QuantOptions
+{
+    // 每层的 4 类矩阵是否量化成 Q8_0
+    bool qkv = true;
+    bool attn_proj = true;
+    bool mlp_fc = true;
+    bool mlp_proj = true;
+    enum class LmHead
+    {
+        fp32,
+        fp16,
+        q8_0
+    };
+    LmHead lm_head = LmHead::fp16;
+    // 只量化权重：量化后立即反量化回 fp32，仍走 fp32 kernel，激活不量化。
+    // 速度没有任何提升，只用来把「权重误差」和「激活误差」拆开看
+    bool weight_only = false;
+};
+
 class GPT
 {
   public:
     static GPT load(const std::string &model_path);
+
+    // 每层的 4 个矩阵量化成 Q8_0 并释放 fp32 版本；lm_head 存一份 fp16。
+    // lm_head 不用 Q8_0：它的输入（ln_f 输出）有比普通通道大 ~300 倍的离群通道，
+    // 激活和权重按组量化都会被它毁掉精度（困惑度 +8%），fp16 + fp32 激活则几乎无损。
+    // 词嵌入 wte 仍保留 fp32 用来查表。decode 每 token 读的权重从 ~494 MB 降到 ~173 MB。
+    void quantize_q8_0()
+    {
+        quantize(QuantOptions{});
+    }
+    // 按 opt 量化，只能调用一次
+    void quantize(const QuantOptions &opt);
+    bool is_quantized() const noexcept
+    {
+        return quantized_;
+    }
     const GPTConfig &config() const noexcept
     {
         return cfg_;
@@ -223,7 +280,14 @@ class GPT
         Tensor attn_proj_w, attn_proj_b;
         Tensor fc_w, fc_b;     // c_fc:   [4*n_embd, n_embd]
         Tensor proj_w, proj_b; // c_proj: [n_embd, 4*n_embd]
+        // quantize_q8_0() 之后使用这几份，对应的 fp32 权重被释放
+        QMatrixQ8 attn_wq, attn_proj_wq, fc_wq, proj_wq;
     };
+    // 量化之后 lm_head 用下面三者之一（都是 [n_vocab, C]），都为空时直接用 wte_
+    std::vector<std::uint16_t> lm_head_f16_;
+    QMatrixQ8 lm_head_q_;
+    Tensor lm_head_f32_; // weight_only 实验：量化再反量化的 wte，不影响词嵌入查表
+    bool quantized_ = false;
     std::vector<Layer> layers_;
     Tensor wte_, wpe_, lnf_w_, lnf_b_;
     OpProfile *profile_ = nullptr; // 非空时 forward_impl 把各算子耗时累加进去

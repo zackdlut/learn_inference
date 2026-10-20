@@ -94,6 +94,7 @@ namespace
 // 本机实测（热缓存、冷缓存都测过）decode 的交叉点在 Tk ≈ 384~512：
 // Tk ≤ 256 并行反而慢，Tk = 384 持平，Tk ≥ 512 开始赚。300k ≈ decode 的 Tk = 390。
 constexpr int64 kAttnParallelMinWork = 300'000;
+int64 g_attn_parallel_min_work = kAttnParallelMinWork;
 
 float dot(const float *a, const float *b, int64 n)
 {
@@ -208,13 +209,20 @@ void attention_f32_strided(HeadView q, HeadView k, HeadView v, float *out, int64
     };
 
     const int64 n_tasks = n_head * Tq;
-    if (n_head * Tq * Tk * head_size < kAttnParallelMinWork)
+    if (n_head * Tq * Tk * head_size < g_attn_parallel_min_work)
     {
         for (int64 t = 0; t < n_tasks; ++t)
             one_task(t);
         return;
     }
     parallel_for(n_tasks, one_task);
+}
+
+int64 set_attention_parallel_min_work(int64 work) noexcept
+{
+    const int64 old = g_attn_parallel_min_work;
+    g_attn_parallel_min_work = work < 0 ? kAttnParallelMinWork : work;
+    return old;
 }
 
 void attention_f32(std::span<const float> q, std::span<const float> k, std::span<const float> v,

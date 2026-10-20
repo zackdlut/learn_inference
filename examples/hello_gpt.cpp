@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdlib>
 #include <format>
 #include <iostream>
@@ -61,12 +62,20 @@ std::string show(const std::string &s)
 
 // 分算子耗时表。矩阵乘那几行额外给出「有效带宽」= 权重字节数 / 耗时：
 // decode 是访存密集的，这个数离机器的内存带宽上限越近，说明内核越接近最优。
+// 每个权重几字节：fp32 是 4；fp16 是 2；Q8_0 每 32 个权重存 32 个 int8 + 1 个 fp32 scale = 1.125
+struct WeightBytes
+{
+    double layer = 4.0;   // 每层的 4 个矩阵
+    double lm_head = 4.0; // 输出层
+};
+
 void print_profile(const char *title, const inference::OpProfile &p,
-                   const inference::GPTConfig &cfg)
+                   const inference::GPTConfig &cfg, WeightBytes wb = {})
 {
     if (p.forwards == 0)
         return;
     const double L = cfg.n_layer, C = cfg.n_embd, V = cfg.n_vocab;
+    const double B = wb.layer;
     const double n = p.forwards;
     struct Row
     {
@@ -77,15 +86,15 @@ void print_profile(const char *title, const inference::OpProfile &p,
     const Row rows[] = {
         {"embed", p.embed, 0},
         {"layernorm", p.layernorm, 0},
-        {"qkv (c_attn)", p.qkv, L * C * 3 * C * 4},
+        {"qkv (c_attn)", p.qkv, L * C * 3 * C * B},
         {"copy (split/kv)", p.copy, 0},
         {"attention", p.attention, 0},
-        {"attn_proj", p.attn_proj, L * C * C * 4},
+        {"attn_proj", p.attn_proj, L * C * C * B},
         {"residual add", p.residual, 0},
-        {"mlp_fc", p.mlp_fc, L * C * 4 * C * 4},
+        {"mlp_fc", p.mlp_fc, L * C * 4 * C * B},
         {"gelu", p.gelu, 0},
-        {"mlp_proj", p.mlp_proj, L * 4 * C * C * 4},
-        {"lm_head", p.lm_head, V * C * 4},
+        {"mlp_proj", p.mlp_proj, L * 4 * C * C * B},
+        {"lm_head", p.lm_head, V * C * wb.lm_head},
         {"sample", p.sample, 0},
     };
     const double total = p.total();
@@ -100,6 +109,44 @@ void print_profile(const char *title, const inference::OpProfile &p,
         println("  {:<16}{:>10.3f}{:>7.1f}%{:>12}", r.name, r.ms / n, r.ms / total * 100.0, bw);
     }
     println("  {:<16}{:>10.3f}", "合计", total / n);
+}
+
+// 困惑度 = exp(平均每个 token 的负对数似然)。直观理解：模型在每个位置上
+// 「相当于在多少个词里均匀瞎猜」。越低越好；量化后涨得越少，说明精度损失越小。
+double perplexity(GPT &model, const std::vector<int> &tokens)
+{
+    const Tensor logits = model.forward(tokens);
+    const std::span<const float> lv = logits.data();
+    const auto V = static_cast<std::size_t>(logits.dim(1));
+    double nll = 0.0;
+    for (std::size_t t = 0; t + 1 < tokens.size(); ++t)
+    {
+        const float *row = lv.data() + t * V;
+        const float mx = *std::max_element(row, row + V);
+        double sum = 0.0;
+        for (std::size_t i = 0; i < V; ++i)
+            sum += std::exp(static_cast<double>(row[i] - mx));
+        const double log_p = static_cast<double>(row[tokens[t + 1]] - mx) - std::log(sum);
+        nll -= log_p;
+    }
+    return std::exp(nll / static_cast<double>(tokens.size() - 1));
+}
+
+std::vector<int> top_k_ids(const Tensor &logits_row, int k)
+{
+    const std::span<const float> v = logits_row.data();
+    std::vector<int> order(v.size());
+    for (std::size_t i = 0; i < v.size(); ++i)
+        order[i] = static_cast<int>(i);
+    std::partial_sort(order.begin(), order.begin() + k, order.end(),
+                      [&](int a, int b) { return v[a] > v[b]; });
+    order.resize(static_cast<std::size_t>(k));
+    return order;
+}
+
+Tensor last_row(const Tensor &logits)
+{
+    return logits.slice(0, logits.dim(0) - 1, logits.dim(0)).contiguous();
 }
 
 int main(int argc, char **argv)
@@ -261,18 +308,13 @@ int main(int argc, char **argv)
                     static_cast<double>(KVCache(cfg, cfg.n_ctx).bytes()) / 1e6);
         }
 
-        // ---------------------------------------------------------------------
-        section("6. 生成");
-        // ---------------------------------------------------------------------
-        {
+        // 生成一段文字并打印速度和分算子耗时；fp32 和量化后各跑一次
+        auto run_generation = [&](WeightBytes wb) {
             SamplerConfig sc;
             sc.temperature = temp;
             sc.top_k = 40;
             sc.top_p = 0.95F;
             Sampler sampler{sc};
-
-            println("prompt: \033[33m{}\033[0m", prompt);
-            println("温度 {:.1f}{}\n", temp, temp <= 0.0F ? "（贪心）" : "");
 
             std::cout << "\033[33m" << prompt << "\033[0m" << std::flush;
             GPT::GenStats st;
@@ -284,11 +326,70 @@ int main(int argc, char **argv)
                     static_cast<double>(ids.size()) / st.prefill_ms * 1000.0);
             println("decode {} 个 token:  {:.0f} ms  （{:.1f} token/s）", st.generated,
                     st.decode_ms, static_cast<double>(st.generated) / st.decode_ms * 1000.0);
-            print_profile("prefill 分算子耗时", st.prefill_ops, cfg);
-            print_profile("decode 分算子耗时", st.decode_ops, cfg);
-            println("\nprefill 是计算密集的（大矩阵乘），decode 是访存密集的：");
-            println("每生成一个词，都要把 500 MB 权重完整读一遍。这就是为什么");
-            println("大模型推理的瓶颈通常是内存带宽，而不是算力 —— 也是量化（阶段 7）的动机。");
+            print_profile("prefill 分算子耗时", st.prefill_ops, cfg, wb);
+            print_profile("decode 分算子耗时", st.decode_ops, cfg, wb);
+        };
+
+        // ---------------------------------------------------------------------
+        section("6. 生成");
+        // ---------------------------------------------------------------------
+        println("prompt: \033[33m{}\033[0m", prompt);
+        println("温度 {:.1f}{}\n", temp, temp <= 0.0F ? "（贪心）" : "");
+        run_generation({});
+        println("\nprefill 是计算密集的（大矩阵乘），decode 是访存密集的：");
+        println("每生成一个词，都要把 500 MB 权重完整读一遍。这就是为什么");
+        println("大模型推理的瓶颈通常是内存带宽，而不是算力 —— 也是量化（阶段 7）的动机。");
+
+        // ---------------------------------------------------------------------
+        section("7. 量化：层内 Q8_0 + lm_head fp16");
+        // ---------------------------------------------------------------------
+        {
+            // 一段固定的英文，用来测困惑度。量化前后用同一段，才有可比性
+            const std::string text =
+                "The city of Paris is the capital and most populous city of France. It is "
+                "located on the Seine River, in the north of the country. Since the 17th "
+                "century, Paris has been one of the major centres of finance, diplomacy, "
+                "commerce, culture, fashion and gastronomy. For its leading role in the arts "
+                "and sciences, it was called the capital of the world in the 19th century.";
+            const std::vector<int> ppl_ids = tok.encode(text);
+
+            const double ppl_fp32 = perplexity(model, ppl_ids);
+            const Tensor ref_last = last_row(model.forward(ids));
+
+            t0 = Clock::now();
+            model.quantize_q8_0();
+            const double quant_ms = ms_since(t0);
+
+            const double L = cfg.n_layer, C = cfg.n_embd, V = cfg.n_vocab;
+            const double n_layer_w = L * 12 * C * C, n_lm_w = V * C; // 每 token 读的权重个数
+            println("量化耗时 {:.0f} ms（只在加载时做一次）", quant_ms);
+            println("每 token 读的权重: fp32 {:.0f} MB → 量化后 {:.0f} MB",
+                    (n_layer_w + n_lm_w) * 4 / 1e6, (n_layer_w * 1.125 + n_lm_w * 2) / 1e6);
+            println("  层内 48 个矩阵 Q8_0（1.125 B/权重），lm_head fp16（2 B/权重）。");
+            println("  lm_head 不用 Q8_0：它的输入 ln_f 输出里有个通道大到 ~240，普通通道 <1，");
+            println("  按 32 个一组量化时，同组其它 31 个数会被压成 0 或 ±2，困惑度会涨 ~8%。");
+
+            const double ppl_q8 = perplexity(model, ppl_ids);
+            const Tensor q_last = last_row(model.forward(ids));
+
+            const auto top_ref = top_k_ids(ref_last, 10);
+            const auto top_q = top_k_ids(q_last, 10);
+            int overlap = 0;
+            for (int id : top_q)
+                overlap += static_cast<int>(std::count(top_ref.begin(), top_ref.end(), id));
+
+            println("\n精度对比（{} 个 token 的文本）:", ppl_ids.size());
+            println("  困惑度   fp32 {:.3f}   量化 {:.3f}   （{:+.2f}%）", ppl_fp32, ppl_q8,
+                    (ppl_q8 / ppl_fp32 - 1.0) * 100.0);
+            println("  prompt 最后位置 logits 最大误差 {:.3f}（logits 量级约 ±100）",
+                    ops::max_abs_diff(ref_last, q_last));
+            println("  top-1 是否一致: {}，top-10 重合 {}/10", top_ref[0] == top_q[0] ? "是" : "否",
+                    overlap);
+
+            println("\n量化后再生成一次（同样的 prompt 和采样设置）:\n");
+            run_generation({.layer = 1.125, .lm_head = 2.0});
+            println("\n对比第 6 节：层内矩阵读的字节变成 1/3.6，lm_head 变成 1/2，");
+            println("耗时也接近按比例下降 —— 访存密集的算子，省字节就是省时间。");
         }
 
         if (temp <= 0.0F)

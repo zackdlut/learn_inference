@@ -5,6 +5,7 @@
 #include "inference/tensor.hpp"
 #include <algorithm>
 #include <chrono>
+#include <cstdlib>
 #include <cmath>
 #include <format>
 #include <numeric>
@@ -66,12 +67,23 @@ void layernorm_rows(const float *x, const Tensor &w, const Tensor &b, float *out
     }
 }
 
-// out[M, N] = a[M, K] × wᵀ + bias，w 是 [N, K]
-void linear_bias(const float *a, const Tensor &w, const Tensor &bias, float *out, int64 M, int64 N,
-                 int64 K)
+// out[M, N] = a[M, K] × wᵀ（w 是 [N, K]）。有量化版就用量化版，否则用 fp32
+void matmul_weight(const float *a, const Tensor &w, const QMatrixQ8 &wq, float *out, int64 M,
+                   int64 N, int64 K)
 {
-    kernel::matmul_nt_f32({a, static_cast<std::size_t>(M * K)}, w.data(),
-                          {out, static_cast<std::size_t>(M * N)}, M, N, K);
+    const std::span<const float> as{a, static_cast<std::size_t>(M * K)};
+    const std::span<float> os{out, static_cast<std::size_t>(M * N)};
+    if (!wq.empty())
+        kernel::matmul_nt_q8_0(as, wq.q.data(), wq.scale.data(), os, M, N, K);
+    else
+        kernel::matmul_nt_f32(as, w.data(), os, M, N, K);
+}
+
+// out[M, N] = a[M, K] × wᵀ + bias
+void linear_bias(const float *a, const Tensor &w, const QMatrixQ8 &wq, const Tensor &bias,
+                 float *out, int64 M, int64 N, int64 K)
+{
+    matmul_weight(a, w, wq, out, M, N, K);
     const float *b = bias.data().data();
     for (int64 r = 0; r < M; ++r)
     {
@@ -422,7 +434,7 @@ Tensor GPT::forward_impl(std::span<const int> tokens, int start_pos, KVCache *ca
         // 输出 [T, 3C] 的每一行是 [q | k | v]，后面直接按行距 3C 读，不拆成三个张量。
         {
             ScopedTimer tm(slot(&OpProfile::qkv));
-            linear_bias(h, L.attn_w, L.attn_b, qkv, T, C3, C);
+            linear_bias(h, L.attn_w, L.attn_wq, L.attn_b, qkv, T, C3, C);
         }
 
         // k/v 从哪读：不用 cache 时直接读 qkv 里的 k/v 段（行距 3C），
@@ -450,7 +462,7 @@ Tensor GPT::forward_impl(std::span<const int> tokens, int start_pos, KVCache *ca
 
         {
             ScopedTimer tm(slot(&OpProfile::attn_proj));
-            linear_bias(att, L.attn_proj_w, L.attn_proj_b, h, T, C, C);
+            linear_bias(att, L.attn_proj_w, L.attn_proj_wq, L.attn_proj_b, h, T, C, C);
         }
         {
             ScopedTimer tm(slot(&OpProfile::residual));
@@ -468,7 +480,7 @@ Tensor GPT::forward_impl(std::span<const int> tokens, int start_pos, KVCache *ca
         }
         {
             ScopedTimer tm(slot(&OpProfile::mlp_fc));
-            linear_bias(h, L.fc_w, L.fc_b, fc, T, C4, C);
+            linear_bias(h, L.fc_w, L.fc_wq, L.fc_b, fc, T, C4, C);
         }
         {
             ScopedTimer tm(slot(&OpProfile::gelu));
@@ -477,7 +489,7 @@ Tensor GPT::forward_impl(std::span<const int> tokens, int start_pos, KVCache *ca
         }
         {
             ScopedTimer tm(slot(&OpProfile::mlp_proj));
-            linear_bias(fc, L.proj_w, L.proj_b, h, T, C, C4);
+            linear_bias(fc, L.proj_w, L.proj_wq, L.proj_b, h, T, C, C4);
         }
         {
             ScopedTimer tm(slot(&OpProfile::residual));
@@ -505,11 +517,98 @@ Tensor GPT::forward_impl(std::span<const int> tokens, int start_pos, KVCache *ca
     // wte 是 [n_vocab, C]，正好是 matmul_nt 要的 (out, in) 布局。
     // logits 是返回值，只有它每次新分配。
     Tensor logits = Tensor::zeros({rows, cfg_.n_vocab});
-    kernel::matmul_nt_f32({last, static_cast<std::size_t>(rows * C)}, wte_.data(), logits.data(),
-                          rows, cfg_.n_vocab, C);
+    const std::span<const float> last_span{last, static_cast<std::size_t>(rows * C)};
+    if (!lm_head_f16_.empty())
+        kernel::matmul_nt_f16(last_span, lm_head_f16_.data(), logits.data(), rows, cfg_.n_vocab, C);
+    else
+        matmul_weight(last, lm_head_f32_.numel() ? lm_head_f32_ : wte_, lm_head_q_,
+                      logits.data().data(), rows, cfg_.n_vocab, C);
     if (trace)
         trace->logits = logits;
     return logits;
+}
+
+// ---------------------------------------------------------------------------
+// 量化
+// ---------------------------------------------------------------------------
+QMatrixQ8 QMatrixQ8::quantize(const Tensor &w)
+{
+    if (w.ndim() != 2 || w.dim(1) % kernel::kQ8Block != 0)
+        fail(std::format("Q8_0 量化要求二维权重且列数是 {} 的倍数，拿到 {}", kernel::kQ8Block,
+                         to_string(w.shape())));
+    QMatrixQ8 m;
+    m.rows = w.dim(0);
+    m.cols = w.dim(1);
+    m.q.resize(static_cast<std::size_t>(m.rows * m.cols));
+    m.scale.resize(static_cast<std::size_t>(m.rows * m.cols / kernel::kQ8Block));
+    const Tensor src = w.contiguous();
+    const float *s = src.data().data();
+    const int64 nb = m.cols / kernel::kQ8Block;
+    for (int64 r = 0; r < m.rows; ++r)
+        kernel::quantize_row_q8_0(s + r * m.cols, m.q.data() + r * m.cols, m.scale.data() + r * nb,
+                                  m.cols);
+    return m;
+}
+
+namespace
+{
+Tensor dequantize(const QMatrixQ8 &m)
+{
+    Tensor t = Tensor::zeros({m.rows, m.cols});
+    kernel::dequantize_row_q8_0(m.q.data(), m.scale.data(), t.data().data(), m.rows * m.cols);
+    return t;
+}
+} // namespace
+
+void GPT::quantize(const QuantOptions &opt)
+{
+    if (quantized_)
+        fail("GPT::quantize 只能调用一次（fp32 权重在第一次量化时已经释放）");
+
+    // weight_only：存「量化再反量化」的 fp32 权重，forward 仍走 fp32 kernel，激活不量化
+    auto apply = [&](bool enabled, Tensor &w, QMatrixQ8 &wq)
+    {
+        if (!enabled)
+            return;
+        QMatrixQ8 q = QMatrixQ8::quantize(w);
+        if (opt.weight_only)
+        {
+            w = dequantize(q);
+            return;
+        }
+        wq = std::move(q);
+        w = Tensor{}; // fp32 版本不再需要，释放掉：量化的意义之一就是省内存
+    };
+    for (Layer &L : layers_)
+    {
+        apply(opt.qkv, L.attn_w, L.attn_wq);
+        apply(opt.attn_proj, L.attn_proj_w, L.attn_proj_wq);
+        apply(opt.mlp_fc, L.fc_w, L.fc_wq);
+        apply(opt.mlp_proj, L.proj_w, L.proj_wq);
+    }
+
+    // wte 既是词嵌入表（查表只读一行，不值得压缩），也是 lm_head（每 token 整张读一遍）。
+    // 保留 fp32 的 wte 查表，另存一份压缩版专门给 lm_head 用
+    switch (opt.lm_head)
+    {
+    case QuantOptions::LmHead::fp32:
+        break;
+    case QuantOptions::LmHead::fp16:
+    {
+        const Tensor wte = wte_.contiguous();
+        lm_head_f16_.resize(wte.data().size());
+        kernel::convert_f32_to_f16(wte.data().data(), lm_head_f16_.data(),
+                                   static_cast<int64>(lm_head_f16_.size()));
+        break;
+    }
+    case QuantOptions::LmHead::q8_0:
+        if (opt.weight_only)
+            lm_head_f32_ = dequantize(QMatrixQ8::quantize(wte_));
+        else
+            lm_head_q_ = QMatrixQ8::quantize(wte_);
+        break;
+    }
+    quantized_ = true;
 }
 
 Tensor GPT::forward(std::span<const int> tokens)

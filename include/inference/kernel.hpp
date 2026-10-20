@@ -114,6 +114,35 @@ struct HeadView
 void attention_f32_strided(HeadView q, HeadView k, HeadView v, float *out, int64 ldo, int64 Tq,
                            int64 Tk, int64 n_head, int64 head_size, int64 q_offset);
 
+// 注意力的并行阈值：n_head × Tq × Tk × head_size 小于它时串行。返回旧值。
+// 只给实验用（bench/bench_kvlayout.cpp 扫交叉点）：传 0 = 总是并行，传负数 = 恢复默认 30 万
+int64 set_attention_parallel_min_work(int64 work) noexcept;
+
+// --- 量化：Q8_0 ---------------------------------------------------------------
+// 每 32 个数一组，存 32 个 int8 和 1 个 float scale：x ≈ q × scale。
+// 一个权重平均 1 + 4/32 = 1.125 字节，是 fp32 的 28%。decode 是访存密集的，
+// 少读多少字节就快多少。
+constexpr int64 kQ8Block = 32;
+
+// 量化 / 反量化一行，n 必须是 32 的倍数。scale 长度为 n / 32
+void quantize_row_q8_0(const float *x, std::int8_t *q, float *scale, int64 n);
+void dequantize_row_q8_0(const std::int8_t *q, const float *scale, float *x, int64 n);
+
+// C[M,N] = A[M,K] × Wᵀ，W 是按行量化的 Q8_0 [N,K]（wq: N×K 个 int8，ws: N×K/32 个 scale）。
+// A 每行也会先量化成 Q8_0，点积全程用 8 位整数 SIMD。K 必须是 32 的倍数。
+void matmul_nt_q8_0(std::span<const float> a, const std::int8_t *wq, const float *ws,
+                    std::span<float> c, int64 M, int64 N, int64 K);
+
+// --- 半精度权重：fp16 ----------------------------------------------------------
+// 每个权重 2 字节（IEEE half 的位模式存在 uint16 里），激活保持 fp32 不量化。
+// 用在对激活离群值敏感、不适合 Q8_0 的矩阵上（GPT-2 的 lm_head）。
+void convert_f32_to_f16(const float *x, std::uint16_t *y, int64 n);
+void convert_f16_to_f32(const std::uint16_t *x, float *y, int64 n);
+
+// C[M,N] = A[M,K] × Wᵀ，W 是 fp16 [N,K]，A、C 是 fp32
+void matmul_nt_f16(std::span<const float> a, const std::uint16_t *w, std::span<float> c, int64 M,
+                   int64 N, int64 K);
+
 // 运行期查询本次构建是否带 AVX2（-march=native 关掉时会回退到标量版）
 bool has_avx2_support() noexcept;
 // 多线程用几个线程。默认取硬件并发数，设成 1 就等于串行。
