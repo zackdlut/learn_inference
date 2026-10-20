@@ -1,0 +1,441 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Logits Processor · Presence / Frequency Penalty 的原理与实现</title>
+<style>
+  :root {
+    --paper: #fbfaf6; --ink: #222; --muted: #6b6b6b; --line: #e4e1d8;
+    --hand: "Comic Sans MS", "Segoe Print", "Kalam", "Xiaolai SC", cursive;
+    --mono: "JetBrains Mono", Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: #ecebe6; color: var(--ink); font-family: system-ui, "PingFang SC", "Microsoft YaHei", sans-serif; }
+  main { max-width: 1100px; margin: 0 auto; padding: 24px 16px 60px; }
+  h1 { font-family: var(--hand); font-size: 1.6rem; margin: 0 0 6px; }
+  .sub { color: var(--muted); margin: 0 0 18px; line-height: 1.6; }
+  h2 { font-family: var(--hand); font-size: 1.3rem; margin: 34px 0 10px; padding-bottom: 4px; border-bottom: 2px dashed #bbb; }
+  .card { background: var(--paper); border: 1px solid var(--line); border-radius: 6px; padding: 14px 18px 12px; margin: 12px 0; box-shadow: 0 1px 3px rgba(0,0,0,.06); }
+  .card h3 { font-family: var(--hand); margin: 0 0 4px; font-size: 1.08rem; }
+  .fig { overflow-x: auto; }
+  .fig svg { display: block; }
+  pre { font-family: var(--mono); font-size: 12.5px; background: #f1efe8; border-left: 3px solid #c9c3b3; padding: 6px 10px; margin: 6px 0; overflow-x: auto; }
+  .note { font-size: 13.5px; line-height: 1.7; color: #333; margin: 4px 0 0; }
+  .legend { display: flex; flex-wrap: wrap; gap: 14px; font-size: 13px; margin: 6px 0 4px; }
+  .legend span { display: inline-flex; align-items: center; gap: 6px; }
+  .legend i { width: 18px; height: 12px; border: 1.5px solid; border-radius: 2px; display: inline-block; }
+  table { border-collapse: collapse; font-size: 13px; margin-top: 6px; width: 100%; }
+  th, td { border: 1px solid var(--line); padding: 4px 10px; text-align: left; vertical-align: top; }
+  th { background: #f1efe8; }
+  code { font-family: var(--mono); font-size: 12.5px; }
+  .red { color: #d23c3c; font-weight: 600; }
+  a { color: #2f6fd6; }
+  .theory { margin-top: 10px; padding: 8px 14px; background: #f7f4fd; border-left: 3px solid #7c4ddb; border-radius: 4px; font-size: 13.5px; line-height: 1.75; }
+  .theory .tag { font-family: var(--hand); font-weight: 600; color: #7c4ddb; }
+  .theory p { margin: 4px 0; }
+  .theory ul { margin: 4px 0; padding-left: 1.3em; }
+  .theory .katex-display { margin: 6px 0; overflow-x: auto; overflow-y: hidden; padding: 2px 0; }
+</style>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" />
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
+</head>
+<body>
+<main>
+  <h1>Logits Processor：在采样之前改写分数</h1>
+  <p class="sub">
+    接着 <a href="gpt2_inference_flow.html">gpt2_inference_flow.html</a> 的第 ⑯ 步：模型给出下一个位置的 <code>logits</code>（长度 <code>V = 50257</code>）之后、
+    <code>Sampler</code> 挑 token 之前，插入一个 <b>logits processor</b>，按照「之前生成过什么」改写这 50257 个分数。
+    本页以 <b>Presence Penalty</b> 和 <b>Frequency Penalty</b> 为例，从原理讲到本仓库的实现
+    （<a href="../include/inference/logits_processor.hpp"><code>logits_processor.hpp</code></a>、
+    <a href="../src/logits_processor.cpp"><code>logits_processor.cpp</code></a>、
+    <a href="../src/gpt.cpp"><code>GPT::generate_with</code></a>）。
+    长度为 V 的向量画成缩短的长条；第三节起用一个只有 6 个词的小词表，格子里是真实数值，
+    <span class="red">红框</span> 表示被惩罚改动过的位置，<span class="red">红色词名</span> 表示当前分数最高的词。
+    文字版笔记见 <a href="logits_processor.md">logits_processor.md</a>；实验程序见
+    <a href="../examples/hello_penalty.cpp"><code>hello_penalty.cpp</code></a>（贪心参数扫描）和
+    <a href="../examples/hello_processor.cpp"><code>hello_processor.cpp</code></a>（单步观察 + 贪心 + 采样对比）。
+  </p>
+  <div class="legend" id="legend"></div>
+  <div id="content"></div>
+</main>
+
+<script>
+const KIND = {
+  data:  { name: "输入 / token id",   stroke: "#2f6fd6", fill: "#e3edfc" },
+  out:   { name: "logits 分数",       stroke: "#0f8b9c", fill: "#dcf3f6" },
+  state: { name: "历史计数 counts",   stroke: "#b5527a", fill: "#fbe6ef" },
+  pen:   { name: "惩罚量 Δ",          stroke: "#d98a00", fill: "#fdf0d6" },
+  prob:  { name: "概率",              stroke: "#239a6a", fill: "#dff4ea" },
+};
+const HL = "#d23c3c";
+
+const M = (r, c, name, kind, opt = {}) => ({ k: "m", r, c, name, kind, ...opt });
+// 带数值的向量：vals 每格一个数（或字符串），labels 是每格上方的词，hl 是要标红的格子下标，best 是最高分的格子
+const Vec = (vals, name, kind, opt = {}) => ({ k: "v", vals, name, kind, ...opt });
+const O = (s) => ({ k: "o", s });
+const A = (s) => ({ k: "a", s });
+
+const TOK = ["the", "cat", "sat", "on", "mat", "dog"];
+const Z   = [3.0, 2.6, 0.5, 0.8, 2.4, 1.9];
+const CNT = [2, 1, 1, 1, 0, 0];
+const D_PRES = [1, 1, 1, 1, 0, 0];
+const D_FREQ = [1.0, 0.5, 0.5, 0.5, 0, 0];
+const D_ALL  = [2.0, 1.5, 1.5, 1.5, 0, 0];
+const Z2  = [1.0, 1.1, -1.0, -0.7, 2.4, 1.9];
+const P   = [0.364, 0.244, 0.030, 0.040, 0.200, 0.121];
+const P2  = [0.112, 0.124, 0.015, 0.020, 0.454, 0.275];
+const SEEN = [0, 1, 2, 3];
+
+const SECTIONS = [
+  { title: "一、Logits processor 在推理流程中的位置", steps: [
+    { title: "① 没有 processor：模型输出直接交给 Sampler",
+      items: [M(1, 900, "logits", "out", { cl: "V" }), A("Sampler"), M(1, 1, "next_id", "data")],
+      code: "Tensor logits = step(tokens, pos, cache);   // [1, 50257]\nint next = sampler.sample(logits.data());     // temperature / top-k / top-p",
+      note: "Sampler 除了随机数种子之外是无状态的：它只看这一步的 50257 个分数，不知道前面生成过什么。所以「别老重复同一个词」这种和历史有关的规则，Sampler 表达不了。" },
+    { title: "② 插入 processor：采样前改写 logits，采样后更新状态",
+      items: [M(1, 900, "logits", "out", { cl: "V" }), A("process"), M(1, 900, "logits'", "out", { cl: "V" }), A("Sampler"), M(1, 1, "next_id", "data"), A("accept"), M(1, 24, "counts", "state", { cl: "出现过的词" })],
+      code: "// src/gpt.cpp  GPT::generate_with\nauto timed_sample = [&](Tensor &lg, OpProfile *prof)\n{\n    ScopedTimer tm(prof ? &prof->sample : nullptr);\n    if (!processor)\n        return sampler.sample(lg.data());\n    processor->process(lg.data());          // 原地改写 logits\n    const int id = sampler.sample(lg.data());\n    processor->accept(id);                  // 记住这一步选了谁\n    return id;\n};",
+      note: "processor 是有状态的一环：accept 把历史记下来，process 再把历史写回 logits。每一步的 logits 都是 forward 刚返回的新张量，用完就丢，所以可以直接原地改，省掉一次 50257 个 float 的拷贝。" },
+    { title: "③ 三个钩子的调用时序",
+      items: [M(1, 5, "prompt", "data"), A("begin(prompt)"), M(1, 1, "第 1 步", "out"), A("process → sample → accept"), M(1, 1, "第 2 步", "out"), A("……"), M(1, 1, "第 N 步", "out")],
+      code: "class LogitsProcessor\n{\n  public:\n    virtual ~LogitsProcessor() = default;\n    virtual void begin(std::span<const int> prompt);     // 每次 generate 开始调用一次\n    virtual void process(std::span<float> logits) = 0;   // 原地改写下一个位置的 logits\n    virtual void accept(int token);                      // 采样出 token 之后调用\n};",
+      note: "begin 清掉上一次生成留下的状态，所以同一个 processor 对象可以反复用于多次 generate；accept 增量更新状态，不用每一步把完整历史重新扫一遍。" },
+  ]},
+  { title: "二、为什么要惩罚重复：贪心解码会复读", steps: [
+    { title: "④ 贪心生成 60 个 token：一句话复读了 4 遍",
+      items: [Vec([8, 8, 7, 7, 4, 4, 4, 4, 4, 4, 3, 3], "60 个 token 里每个词出现的次数", "state",
+                  { labels: ["the", "\\n", "of", "meaning", "not", "same", "as", "death", ".", "The", "life", "is"] })],
+      code: "$ ./build-release/examples/hello_penalty        # prompt: \"The meaning of life is\"\n── presence 0.0  frequency 0.0  │  distinct 0.20  max_rep 8\n not the same as the meaning of death.\\n\\nThe meaning of life is not the same as the meaning of death.\\n\\nThe meaning of life is ...",
+      note: "60 个 token 只用到 12 个不同的词（distinct = 12 / 60 = 0.20），the 和换行各出现 8 次。这是小模型 + 贪心解码的经典病。" },
+    { title: "⑤ 复读越久，模型越笃定：第一名领先第二名的 logit 差",
+      items: [Vec([2.10, 6.39, 10.57, 10.39], "' same' 的领先幅度", "out", { labels: ["第1遍", "第2遍", "第3遍", "第4遍"] }), O("·"),
+              Vec([1.75, 6.72, 9.24, 8.39], "' as' 的领先幅度", "out", { labels: ["第1遍", "第2遍", "第3遍", "第4遍"] })],
+      code: "# 不加惩罚的贪心轨迹上，每一步记录 top1 - top2\nstep  2 ' same'  gap  2.10      step 18 ' same'  gap  6.39\nstep 34 ' same'  gap 10.57      step 50 ' same'  gap 10.39",
+      note: "第一遍说出 \"the same as\" 时，same 只领先第二名 2.1；第二遍就涨到 6.4，第三遍超过 10。领先得越多，越需要大的惩罚才能把它扳倒。" },
+  ]},
+  { title: "三、Presence 与 Frequency：一个 6 个词的小例子", steps: [
+    { title: "⑥ 已生成的历史 → 每个词的出现次数 c",
+      items: [Vec(["the", "cat", "sat", "on", "the"], "已生成 x₁ … x₅", "data"), A("计数"), Vec(CNT, "c", "state", { labels: TOK })],
+      code: "// PenaltyProcessor::accept，每生成一个 token 调用一次\n++counts_[token];",
+      note: "假设词表只有 the / cat / sat / on / mat / dog 六个词，已经生成了 \"the cat sat on the\"。c 是长度为 V 的向量，但绝大多数位置是 0：真实词表有 50257 个词，生成几百个 token 只会碰到几百个。" },
+    { title: "⑦ Presence penalty：出现过就扣固定分数（α_pres = 1.0）",
+      items: [Vec(CNT, "c", "state", { labels: TOK }), A("𝟙[c > 0] × 1.0"), Vec(D_PRES, "Δ_pres", "pen", { labels: TOK, hl: SEEN })],
+      code: "// 只要 counts_[j] > 0\nlogits[j] -= presence_penalty;",
+      note: "the 出现了 2 次、cat 只出现 1 次，但扣的分一样多：presence 只关心「出现过没有」。不管生成多长，每个词最多被扣 α_pres。" },
+    { title: "⑧ Frequency penalty：每出现一次扣一次（α_freq = 0.5）",
+      items: [Vec(CNT, "c", "state", { labels: TOK }), A("× 0.5"), Vec(D_FREQ, "Δ_freq", "pen", { labels: TOK, hl: SEEN })],
+      code: "logits[j] -= frequency_penalty * counts_[j];",
+      note: "the 出现 2 次，扣 1.0；其它出现 1 次的扣 0.5。生成越长，高频词被扣得越多，没有上限。" },
+    { title: "⑨ 合起来：logits − Δ，贪心的选择从 the 变成 mat",
+      items: [Vec(Z, "logits z", "out", { labels: TOK, best: 0 }), O("−"), Vec(D_ALL, "Δ", "pen", { labels: TOK, hl: SEEN }), O("="),
+              Vec(Z2, "z'", "out", { labels: TOK, best: 4, hl: SEEN })],
+      code: "// src/logits_processor.cpp（省略了越界检查）\nvoid PenaltyProcessor::process(std::span<float> logits)\n{\n    if (cfg_.presence_penalty == 0.0F && cfg_.frequency_penalty == 0.0F)\n        return;\n    for (const auto &[token, c] : counts_)\n        logits[token] -= cfg_.frequency_penalty * static_cast<float>(c) + cfg_.presence_penalty;\n}",
+      note: "不加惩罚：the（3.0）最大，生成 \"the cat sat on the the\"。加惩罚后 the 掉到 1.0，没出现过的 mat（2.4）成为第一，生成 \"the cat sat on the mat\"。只遍历 counts_ 里的非零项，没出现过的词一个都不碰。" },
+    { title: "⑩ 换到概率上看：减法变成乘一个衰减系数（τ = 1）",
+      items: [Vec(P, "p = softmax(z)", "prob", { labels: TOK, best: 0 }), A("× e^(−Δ)，再归一化"), Vec(P2, "p' = softmax(z')", "prob", { labels: TOK, best: 4, hl: SEEN })],
+      code: "the: 0.364 × e^(-2.0) = 0.364 × 0.135   → 归一化后 0.112\nmat: 0.200 × e^( 0  ) = 0.200 × 1       → 归一化后 0.454",
+      note: "被惩罚的词概率按 e^(−Δ) 缩小，省下来的概率按比例分给其它词（归一化），所以没出现过的 mat、dog 概率都上升了。" },
+  ]},
+  { title: "四、和 Sampler 的配合", steps: [
+    { title: "⑪ 惩罚在温度、top-k、top-p 之前",
+      items: [M(1, 300, "z", "out", { cl: "V" }), A("− Δ"), M(1, 300, "z'", "out", { cl: "V" }), A("÷ τ"), M(1, 300, "z' / τ", "out", { cl: "V" }),
+              A("top-k / top-p"), M(1, 40, "候选", "prob", { cl: "k" }), A("轮盘赌"), M(1, 1, "next_id", "data")],
+      code: "processor->process(lg.data());            // 1. 惩罚：改原始 logits\nconst int id = sampler.sample(lg.data()); // 2. Sampler 内部：÷τ → top-k → softmax → top-p → 采样",
+      note: "和 OpenAI、vLLM、HuggingFace 的顺序一致：先惩罚，再除温度，再截断候选集。" },
+    { title: "⑫ 贪心时只有一个问题：Δ 有没有超过领先幅度",
+      items: [Vec([2.98, 0], "z（相对第二名）", "out", { labels: ["the", "第二名"], best: 0 }), A("presence 2.0"), Vec([0.98, 0], "z'", "out", { labels: ["the", "第二名"], best: 0, hl: [0] }),
+              O("|"),
+              Vec([2.98, 0], "z（相对第二名）", "out", { labels: ["the", "第二名"], best: 0 }), A("presence 3.0"), Vec([-0.02, 0], "z'", "out", { labels: ["the", "第二名"], best: 1, hl: [0] })],
+      code: "# 第二遍 \"The meaning of life is not\" 之后，' the' 已出现过，领先第二名约 2.98\npresence 2.0 → ... is not the same as that of death. The meaning of life is not the same as ...   （没拦住）\npresence 3.0 → ... is not a matter of time, but rather an experience which ...           （跳出循环）",
+      note: "领先幅度取自不加惩罚的轨迹，开启惩罚后前文略有不同（第一句的 \"the meaning\" 变成了 \"that\"），所以只是近似。但阈值现象很清楚：扣 2 分不够、扣 3 分刚好扳倒。" },
+  ]},
+  { title: "五、本仓库的实现", steps: [
+    { title: "⑬ 数据结构：只存出现过的 token",
+      items: [M(1, 900, "稠密 int[V]", "state", { cl: "V = 50257" }), O("vs"), M(1, 24, "counts_（哈希表）", "state", { cl: "几百个" })],
+      code: "struct PenaltyConfig\n{\n    float presence_penalty = 0.0F;\n    float frequency_penalty = 0.0F;\n    bool include_prompt = false;      // prompt 里的 token 算不算「出现过」\n};\n\nclass PenaltyProcessor final : public LogitsProcessor\n{\n    ...\n    std::unordered_map<int, int> counts_;   // token id → 出现次数\n};",
+      note: "process 只遍历出现过的词，每步 O(distinct)；用稠密数组的话每次 begin 还要清零 50257 项。两者都远小于一次 forward（约 10 ms），选哈希表是因为它和「只有少数词被惩罚」这件事一一对应。" },
+    { title: "⑭ begin(prompt)：清空状态，按需把 prompt 也算进去",
+      items: [Vec(["The", "meaning", "of", "life", "is"], "prompt", "data"), A("include_prompt = true"), Vec([1, 1, 1, 1, 1], "counts_", "state", { labels: ["The", "meaning", "of", "life", "is"] })],
+      code: "void PenaltyProcessor::begin(std::span<const int> prompt)\n{\n    counts_.clear();\n    if (cfg_.include_prompt)\n    {\n        for (int t : prompt)\n            accept(t);\n    }\n}",
+      note: "默认 include_prompt = false，和 OpenAI、vLLM 一致：只惩罚模型自己生成的词。打开后，模型连 prompt 里的词也会尽量避开，适合摘要、改写；问答和代码补全通常需要复用 prompt 里的术语，应该关掉。" },
+    { title: "⑮ accept(token)：计数加一",
+      items: [M(1, 1, "next_id", "data"), A("++counts_[id]"), M(1, 24, "counts_", "state", { cl: "出现过的词" })],
+      code: "void PenaltyProcessor::accept(int token)\n{\n    if (token < 0)\n        fail(std::format(\"token id 不能为负：{}\", token));\n    ++counts_[token];\n}",
+      note: "accept 不知道词表大小，越界检查放在 process 里：counts_ 里的 id 超过 logits 长度就报错，而不是悄悄写坏内存。" },
+    { title: "⑯ 接进 generate：最后一个参数",
+      items: [M(1, 5, "prompt", "data"), A("prefill"), M(1, 900, "logits", "out", { cl: "V" }), A("process → sample → accept"), M(1, 1, "next", "data"), A("decode × N"), M(1, 1, "…", "data")],
+      code: "inference::Sampler sampler{inference::SamplerConfig{.temperature = 0.8F, .top_k = 40}};\ninference::PenaltyProcessor penalty{inference::PenaltyConfig{\n    .presence_penalty = 0.6F,\n    .frequency_penalty = 0.4F,\n}};\nauto out = model.generate(prompt_ids, 100, sampler, /*stats=*/nullptr, /*on_token=*/{}, &penalty);",
+      note: "generate 和 generate_graph 都走 generate_with，都接受这个参数；不传时行为和以前完全一样。processor 的耗时计入分算子耗时表里的 sample 一行。" },
+  ]},
+  { title: "六、真实模型上的一步（hello_processor）", steps: [
+    { title: "⑰ GPT-2 的 top-5：presence 3.0 让 the 以 0.02 之差落到第二",
+      items: [Vec([-21.53, -24.51, -24.83, -25.30, -25.32], "不加惩罚", "out", { labels: ["the", "a", "that", "death", "life"], best: 0 }),
+              A("presence 3.0"),
+              Vec([-24.53, -24.51, -24.83, -28.30, -28.32], "z'", "out", { labels: ["the", "a", "that", "death", "life"], best: 1, hl: [0, 3, 4] })],
+      code: "$ ./build-release/examples/hello_processor\n上下文（生成部分的最后 12 个 token）: … meaning of death.\\n\\nThe meaning of life is not▌\n不加惩罚时贪心会选 ' the'，它在生成部分已经出现了 2 次\n\n  pres  0.0  freq  0.0 │  ' the' -21.53(c=2)  ' a' -24.51  ' that' -24.83  ' death' -25.30(c=1)  ' life' -25.32(c=1)\n  pres  1.0  freq  0.0 │  ' the' -22.53(c=2)  ' a' -24.51  ' that' -24.83  ' what'  -25.39       ' to'   -25.61\n  pres  3.0  freq  0.0 │  ' a'   -24.51       ' the' -24.53(c=2)  ' that' -24.83  ' what' -25.39  ' to'   -25.61",
+      note: "hello_processor 先不加惩罚贪心生成，找到第一个「已经生成过 2 次、还要再选一次」的位置，把这一步的 logits 交给不同的 processor。GPT-2 的 logits 整体偏负，绝对值没有意义，只看差值。the 和 a 之间差 2.98：presence 1.0 不够，3.0 刚好越过。" },
+  ]},
+];
+
+const THEORY = {
+  "①": String.raw`
+    <p>模型给出的是条件分布的 logits \(z = f_\theta(x_{1:t}) \in \mathbb{R}^V\)，Sampler 把它变成一个 token：</p>
+    \[ p(v \mid x_{1:t}) = \frac{\exp(z_v/\tau)\;\mathbb{1}[v \in \mathcal{S}]}{\sum_{u \in \mathcal{S}} \exp(z_u/\tau)} \]
+    <p>其中 \(\tau\) 是温度，\(\mathcal{S}\) 是 top-k / top-p 留下的候选集。注意 \(\mathcal{S}\) 和 \(\tau\) 都只由 \(z\) 决定。模型本身看到了全部历史 \(x_{1:t}\)，但它的偏好是「训练语料里最可能的下一个词」，而高似然往往意味着重复。要表达「人对输出的额外偏好」，只能在 \(z\) 上动手。</p>`,
+  "②": String.raw`
+    <p>一般地，logits processor 是一个依赖历史的变换：</p>
+    \[ z' = g\big(z,\ x_{1:t}\big),\qquad q(v \mid x_{1:t}) \propto \exp\!\big(z'_v / \tau\big) \]
+    <p>它只改分数、不改模型，所以可以在推理时随意组合。常见的控制都是这种形式：</p>
+    <ul>
+      <li><b>logit bias</b>：\(z' = z + b\)，\(b\) 是固定向量（OpenAI 的 <code>logit_bias</code>）。</li>
+      <li><b>禁用词 / 结构化输出</b>：不允许的位置设成 \(-\infty\)，概率恰好为 0。按语法约束解码（JSON schema）就是每步算一个这样的掩码。</li>
+      <li><b>重复惩罚</b>：\(z' = z - \Delta(x_{1:t})\)，本页的主角。</li>
+    </ul>`,
+  "③": String.raw`
+    <p>Presence / frequency 只依赖每个词的出现次数，次数可以增量维护：</p>
+    \[ c^{(t)} = c^{(t-1)} + \mathrm{onehot}(x_t) \]
+    <p>每步 \(O(1)\) 更新，而不是每步重新扫描长度为 \(t\) 的历史（那样生成 \(N\) 个 token 总共要 \(O(N^2)\)）。这就是把接口拆成 <code>process</code> 和 <code>accept</code> 的原因。生成循环的最后一步也会调用 <code>accept</code>，虽然之后不再 <code>process</code>，但多记一次没有副作用。</p>`,
+  "④": String.raw`
+    <p>贪心每步取 \(\arg\max_v p(v \mid x_{1:t})\)，追求的是局部最高概率。Holtzman 等人在 <i>The Curious Case of Neural Text Degeneration</i>（2019）里发现：人写的文本每个词的概率其实忽高忽低，而最大化概率的解码会掉进高概率、低信息量的循环。</p>
+    <p>机制上，Transformer 里有一类<b>归纳头</b>（induction head）：看到 \([A][B] \cdots [A]\) 就预测下一个是 \([B]\)，也就是「照抄前文」。一句话一旦出现过一次，第二次出现时每个词都能被前文「预言」，概率进一步升高，形成正反馈。</p>`,
+  "⑤": String.raw`
+    <p>贪心时，惩罚能不能改变选择只取决于第一名和第二名的差距。设第一名是 \(a\)、第二名是 \(b\)，领先幅度 \(g = z_a - z_b\)，那么换词的条件是</p>
+    \[ \Delta_a - \Delta_b > g \]
+    <p>如果第二名没出现过（\(\Delta_b = 0\)），就要求 \(\Delta_a > g\)。实测 \(g\) 前几遍每复读一遍涨 3~5，而 frequency penalty 每复读一遍只多扣 \(\alpha_{\text{freq}}\)：</p>
+    \[ \Delta_a^{(k)} = \alpha_{\text{freq}}\, k + \alpha_{\text{pres}} \quad\text{vs}\quad g^{(k)} \approx 2,\ 6.4,\ 10.6,\ \dots \]
+    <p>\(\alpha_{\text{freq}} = 0.5\) 时第二遍只扣 0.5、第三遍扣 1.0，永远追不上。所以<b>惩罚必须在复读的头一两遍就足够大</b>，等循环形成就晚了。</p>`,
+  "⑥": String.raw`
+    \[ c_j = \sum_{s \in \mathcal{H}} \mathbb{1}[x_s = j],\qquad \mathcal{H} = \begin{cases} \{T+1, \dots, t\} & \text{只统计生成部分（默认）} \\ \{1, \dots, t\} & \texttt{include\_prompt = true} \end{cases} \]
+    <p>\(T\) 是 prompt 长度。\(c\) 名义上是 \(V\) 维向量，但非零项不超过 \(|\mathcal{H}|\)，所以用稀疏结构存。</p>`,
+  "⑦": String.raw`
+    \[ \Delta^{\text{pres}}_j = \alpha_{\text{pres}} \cdot \mathbb{1}[c_j > 0] \]
+    <p>它把词表分成两类：说过的和没说过的，前者统一降分。效果是鼓励模型引入新词、新话题，OpenAI 文档的描述就是 "increasing the model's likelihood to talk about new topics"。因为有上限 \(\alpha_{\text{pres}}\)，生成再长也不会把某个词彻底封死，适合长文本。</p>`,
+  "⑧": String.raw`
+    \[ \Delta^{\text{freq}}_j = \alpha_{\text{freq}} \cdot c_j \]
+    <p>换到概率上，相当于把模型分布乘上一个「反着来的一元语言模型」：</p>
+    \[ q(v) \propto p(v) \cdot e^{-\alpha_{\text{freq}} c_v / \tau} \]
+    <p>历史里越常见的词，这个因子越小。问题在于它没有上限：<code>the</code>、<code>,</code>、<code>.</code> 这类功能词在长文本里会出现几十次，被扣到几十分，相当于被禁用，语法会逐渐崩坏。所以它更适合短回复。</p>
+    <p>另一种常见的 <code>repetition_penalty</code>（CTRL 论文）是乘法：出现过的词 \(z > 0\) 时除以 \(\theta\)、\(z \le 0\) 时乘以 \(\theta\)。它的效果依赖 \(z\) 的绝对大小，而 softmax 对整体平移不敏感，所以乘法惩罚的强弱会随 logits 的偏移而变化，不如减法「干净」。</p>`,
+  "⑨": String.raw`
+    \[ z'_j = z_j - \alpha_{\text{freq}}\, c_j - \alpha_{\text{pres}}\, \mathbb{1}[c_j > 0] \]
+    <p>代入小例子（\(\alpha_{\text{pres}} = 1.0,\ \alpha_{\text{freq}} = 0.5\)）：</p>
+    \[ z'_{\text{the}} = 3.0 - 0.5 \times 2 - 1.0 = 1.0,\qquad z'_{\text{mat}} = 2.4 - 0 - 0 = 2.4 \]
+    <p>正值抑制重复，负值鼓励重复（例如希望模型反复使用某些关键词）。OpenAI 允许的范围是 \([-2, 2]\)。</p>`,
+  "⑩": String.raw`
+    <p>softmax 对 logits 做减法，等于对概率做乘法再归一化：</p>
+    \[ p'_j = \frac{e^{(z_j - \Delta_j)/\tau}}{\sum_k e^{(z_k - \Delta_k)/\tau}} = \frac{p_j\, e^{-\Delta_j/\tau}}{\sum_k p_k\, e^{-\Delta_k/\tau}} \]
+    <p>几个常用的数：扣 1 分 ≈ 概率乘 \(e^{-1} = 0.37\)，扣 2 分 ≈ 乘 0.14，扣 3 分 ≈ 乘 0.05。温度出现在分母上，<b>温度越低，同样的惩罚效果越强</b>：同一个例子取 \(\tau = 0.5\)，the 的概率从 0.532 降到 0.040。</p>`,
+  "⑪": String.raw`
+    <p>顺序有两个后果：</p>
+    <ul>
+      <li><b>惩罚会被温度放大或缩小</b>：Sampler 算的是 \((z - \Delta)/\tau\)，等效惩罚是 \(\Delta / \tau\)。同一组参数，\(\tau = 0.7\) 时比 \(\tau = 1.0\) 强 1.4 倍。</li>
+      <li><b>候选集在惩罚之后才截断</b>：top-k / top-p 看到的是惩罚后的分数，原本排在 top-k 之外的新词可以挤进候选集。反过来，如果先截断再惩罚，候选集里全是复读的词，惩罚只能在它们之间重新分配概率。</li>
+    </ul>`,
+  "⑫": String.raw`
+    <p>\(\tau \to 0\) 时 \(e^{-\Delta/\tau}\) 要么趋于 0、要么趋于 1，惩罚从「连续地压低概率」退化成「是否换词」的开关：</p>
+    \[ \hat v = \arg\max_v \big(z_v - \Delta_v\big) \]
+    <p>只有 \(\Delta\) 超过领先幅度时选择才会变，没超过就完全没有效果。这解释了实测中 presence 1.0、2.0 几乎没用，而 3.0 突然有效的「断崖」。随机采样时没有这种断崖，惩罚每增加一点，复读的概率就降一点。</p>`,
+  "⑬": String.raw`
+    <p>设 \(D\) 为出现过的不同词数，\(V\) 为词表大小：</p>
+    \[ \text{process: } O(D) \ \text{（稀疏）}\quad\text{vs}\quad O(V)\ \text{（稠密，逐个检查 } c_j > 0\text{）} \]
+    <p>生成几百个 token 时 \(D\) 是几百，\(V = 50257\)。实际上一次 forward 约 10 ms，两种做法的开销都可以忽略；真正有意义的是语义：只有少数词需要处理，数据结构就只存这些词。</p>`,
+  "⑭": String.raw`
+    <p>不同框架对「历史」的定义不一样：</p>
+    <ul>
+      <li><b>OpenAI API、vLLM</b>：presence / frequency 只统计生成的 token，\(\mathcal{H} = \{T+1,\dots,t\}\)。</li>
+      <li><b>llama.cpp</b>：统计最近 <code>penalty_last_n</code>（默认 64）个 token，包括 prompt，\(\mathcal{H} = \{t-63,\dots,t\}\)。滑动窗口让很久以前出现过的词可以「解禁」。</li>
+      <li><b>HuggingFace</b>：<code>repetition_penalty</code> 统计整个 <code>input_ids</code>，包括 prompt。</li>
+    </ul>
+    <p>本仓库默认和 OpenAI 一致，<code>include_prompt</code> 切换到「包括 prompt」。</p>`,
+  "⑮": String.raw`
+    <p>两个参数都为 0 时 <code>process</code> 直接返回，开销为 0；但 <code>accept</code> 照常计数，所以运行中途改参数也能拿到完整的历史。负数 token id 在 <code>accept</code> 时立刻报错；超出词表的 id 只能在 <code>process</code> 时发现（那时才知道 \(V\)）。</p>`,
+  "⑯": String.raw`
+    <p>加上 processor 之后，一次生成的分布是</p>
+    \[ q(x_{T+1:T+N} \mid x_{1:T}) = \prod_{n=1}^{N} \frac{\exp\!\big((z^{(n)} - \Delta^{(n)})_{x_{T+n}}/\tau\big)}{\sum_v \exp\!\big((z^{(n)} - \Delta^{(n)})_v/\tau\big)},\qquad \Delta^{(n)} = \Delta\big(x_{1:T+n-1}\big) \]
+    <p>它已经不是模型本身的分布了：processor 让我们在不重新训练的前提下，把「人对输出的偏好」乘进模型分布里。代价是困惑度这类基于模型分布的指标不再适用于评估这段输出。</p>`,
+  "⑰": String.raw`
+    <p>这一步的领先幅度 \(g = z_{\text{the}} - z_{\text{a}} = -21.53 - (-24.51) = 2.98\)，而 a 没出现过，所以贪心换词的条件就是 \(\Delta_{\text{the}} > 2.98\)：</p>
+    \[ \text{presence } 1.0:\ \Delta = 1.0 \lt 2.98,\qquad \text{presence } 3.0:\ \Delta = 3.0 \gt 2.98,\qquad \text{frequency } 1.5:\ \Delta = 1.5 \times 2 = 3.0 \gt 2.98 \]
+    <p>后两种设置在这一步扣的分数恰好相同，区别要等出现次数不同的词才显现。另一个细节：只出现过 1 次的 death、life 在 presence 1.0 下就掉出了 top-5，被没出现过的 what、to 取代。<b>惩罚对排名的影响不只在第一名</b>，候选集尾部的重新洗牌对随机采样更重要，这也是采样时温和参数就能见效的原因。</p>`,
+};
+
+const theoryHtml = (st) => {
+  const t = THEORY[[...st.title][0]];
+  return t ? `<div class="theory"><span class="tag">原理与公式</span>${t}</div>` : "";
+};
+
+const S = (n) => (n <= 1 ? 12 : Math.round(8 * Math.sqrt(n)));
+const textW = (s, px) => [...s].reduce((w, ch) => w + (ch.charCodeAt(0) > 255 ? px : px * 0.6), 0);
+const fmtVal = (v) => (typeof v === "number" ? String(+v.toFixed(3)) : v);
+const CH = 28;
+
+function braceH(x0, x1, y) {
+  const m = (x0 + x1) / 2, r = Math.min(5, (x1 - x0) / 4);
+  return `M${x0} ${y} Q${x0} ${y - 5} ${x0 + r} ${y - 5} L${m - r} ${y - 5} Q${m} ${y - 5} ${m} ${y - 10} Q${m} ${y - 5} ${m + r} ${y - 5} L${x1 - r} ${y - 5} Q${x1} ${y - 5} ${x1} ${y}`;
+}
+function braceV(x, y0, y1) {
+  const m = (y0 + y1) / 2, r = Math.min(5, (y1 - y0) / 4);
+  return `M${x} ${y0} Q${x - 5} ${y0} ${x - 5} ${y0 + r} L${x - 5} ${m - r} Q${x - 5} ${m} ${x - 10} ${m} Q${x - 5} ${m} ${x - 5} ${m + r} L${x - 5} ${y1 - r} Q${x - 5} ${y1} ${x} ${y1}`;
+}
+
+function renderRow(items) {
+  const LW = 46, PT = 40, PB = 34, GAP = 12;
+  const H = Math.max(24, ...items.filter((i) => i.k === "m").map((i) => S(i.r)), ...items.filter((i) => i.k === "v").map(() => CH));
+  let x = 6;
+  const parts = [];
+  for (const it of items) {
+    if (it.k === "m") {
+      const w = S(it.c), h = S(it.r);
+      const showR = it.r > 1, showC = it.c > 1;
+      const lw = showR ? LW : 6;
+      const nameW = textW(it.name, 14);
+      const bx = x + lw + Math.max(0, (nameW - w) / 2);
+      const by = PT + (H - h) / 2;
+      const k = KIND[it.kind];
+      parts.push(`<rect x="${bx}" y="${by}" width="${w}" height="${h}" rx="2" fill="${k.fill}" stroke="${k.stroke}" stroke-width="1.8"/>`);
+      if (showC) {
+        const col = it.hc ? HL : "#444";
+        parts.push(`<path d="${braceH(bx, bx + w, by - 4)}" fill="none" stroke="${col}" stroke-width="1.3"/>`);
+        parts.push(`<text x="${bx + w / 2}" y="${by - 18}" text-anchor="middle" class="dim" fill="${col}">${it.cl ?? it.c}</text>`);
+      }
+      if (showR) {
+        const col = it.hr ? HL : "#444";
+        parts.push(`<path d="${braceV(bx - 4, by, by + h)}" fill="none" stroke="${col}" stroke-width="1.3"/>`);
+        parts.push(`<text x="${bx - 17}" y="${by + h / 2 + 5}" text-anchor="end" class="dim" fill="${col}">${it.rl ?? it.r}</text>`);
+      }
+      parts.push(`<text x="${bx + w / 2}" y="${by + h + 20}" text-anchor="middle" class="nm">${it.name}</text>`);
+      x = Math.max(bx + w, bx + w / 2 + nameW / 2) + GAP;
+    } else if (it.k === "v") {
+      const labels = it.labels ?? [];
+      const cw = Math.max(40, ...labels.map((l) => textW(l, 12) + 10), ...it.vals.map((v) => textW(fmtVal(v), 13) + 12));
+      const w = cw * it.vals.length, h = CH;
+      const nameW = textW(it.name, 14);
+      const bx = x + 6 + Math.max(0, (nameW - w) / 2);
+      const by = PT + (H - h) / 2;
+      const k = KIND[it.kind];
+      const hl = new Set(it.hl ?? []);
+      it.vals.forEach((v, i) => {
+        const cx = bx + i * cw;
+        const red = hl.has(i);
+        parts.push(`<rect x="${cx}" y="${by}" width="${cw}" height="${h}" fill="${k.fill}" stroke="${red ? HL : k.stroke}" stroke-width="${red ? 2.2 : 1.4}"/>`);
+        parts.push(`<text x="${cx + cw / 2}" y="${by + h / 2 + 5}" text-anchor="middle" class="val"${red ? ` fill="${HL}"` : ""}>${fmtVal(v)}</text>`);
+        if (labels[i] !== undefined) {
+          const best = it.best === i;
+          parts.push(`<text x="${cx + cw / 2}" y="${by - 7}" text-anchor="middle" class="lb${best ? " best" : ""}">${labels[i]}</text>`);
+        }
+      });
+      if (it.best !== undefined) {
+        const cx = bx + it.best * cw;
+        parts.push(`<rect x="${cx + 2}" y="${by + 2}" width="${cw - 4}" height="${h - 4}" fill="none" stroke="${HL}" stroke-width="1" stroke-dasharray="3 2"/>`);
+      }
+      parts.push(`<text x="${bx + w / 2}" y="${by + h + 20}" text-anchor="middle" class="nm">${it.name}</text>`);
+      x = Math.max(bx + w, bx + w / 2 + nameW / 2) + GAP;
+    } else if (it.k === "o") {
+      const w = Math.max(28, textW(it.s, 18) + 14);
+      parts.push(`<text x="${x + w / 2}" y="${PT + H / 2 + 7}" text-anchor="middle" class="op">${it.s}</text>`);
+      x += w;
+    } else {
+      const w = Math.max(80, textW(it.s, 13) + 24);
+      const cy = PT + H / 2;
+      parts.push(`<path d="M${x + 6} ${cy - 2} H${x + w - 10} M${x + 6} ${cy + 2} H${x + w - 10} M${x + w - 18} ${cy - 7} L${x + w - 6} ${cy} L${x + w - 18} ${cy + 7}" fill="none" stroke="#333" stroke-width="1.5"/>`);
+      parts.push(`<text x="${x + w / 2}" y="${cy - 10}" text-anchor="middle" class="ar">${it.s}</text>`);
+      x += w + 4;
+    }
+  }
+  const W = x + 6, Ht = PT + H + PB;
+  return `<svg width="${W}" height="${Ht}" viewBox="0 0 ${W} ${Ht}" xmlns="http://www.w3.org/2000/svg">
+    <style>
+      text { font-family: "Comic Sans MS","Segoe Print","Kalam",cursive,sans-serif; fill: #222; }
+      .dim { font-size: 13px; } .nm { font-size: 14px; } .op { font-size: 20px; font-weight: 600; } .ar { font-size: 13px; }
+      .val { font-size: 13px; font-family: "JetBrains Mono", Consolas, monospace; }
+      .lb { font-size: 12px; fill: #555; } .lb.best { fill: ${HL}; font-weight: 700; }
+      .dim[fill="${HL}"] { font-weight: 700; }
+    </style>${parts.join("")}</svg>`;
+}
+
+const esc = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;");
+
+document.getElementById("legend").innerHTML = Object.values(KIND)
+  .map((k) => `<span><i style="border-color:${k.stroke};background:${k.fill}"></i>${k.name}</span>`).join("");
+
+document.getElementById("content").innerHTML = SECTIONS.map((sec) => `
+  <h2>${sec.title}</h2>
+  ${sec.steps.map((st) => `
+    <div class="card">
+      <h3>${st.title}</h3>
+      <div class="fig">${renderRow(st.items)}</div>
+      <pre>${esc(st.code)}</pre>
+      <p class="note">${esc(st.note)}</p>
+      ${theoryHtml(st)}
+    </div>`).join("")}
+`).join("") + String.raw`
+  <h2>七、贪心参数扫描：GPT-2 small 生成 60 个 token（hello_penalty）</h2>
+  <div class="card">
+    <table>
+      <tr><th>presence</th><th>frequency</th><th>distinct（不同词 / 总数）</th><th>max_rep（最多的词出现几次）</th><th>是否跳出循环</th></tr>
+      <tr><td>0</td><td>0</td><td>0.20</td><td>8</td><td>否</td></tr>
+      <tr><td>1.0</td><td>0</td><td>0.22</td><td>9</td><td>否（只去掉了句间换行）</td></tr>
+      <tr><td>2.0</td><td>0</td><td>0.23</td><td>9</td><td>否</td></tr>
+      <tr><td><b>3.0</b></td><td>0</td><td><b>0.80</b></td><td>4</td><td>是</td></tr>
+      <tr><td>0</td><td>0.5</td><td>0.22</td><td>9</td><td>否</td></tr>
+      <tr><td>0</td><td>1.0</td><td>0.38</td><td>6</td><td>部分</td></tr>
+      <tr><td>0</td><td>1.5</td><td>0.62</td><td>4</td><td>是</td></tr>
+      <tr><td>0</td><td>2.0</td><td>0.72</td><td>4</td><td>是</td></tr>
+      <tr><td>1.0</td><td>0.5</td><td>0.22</td><td>9</td><td>否</td></tr>
+      <tr><td><b>2.0</b></td><td><b>1.0</b></td><td><b>0.92</b></td><td><b>2</b></td><td>是</td></tr>
+    </table>
+    <p class="note">prompt 为 <code>"The meaning of life is"</code>，层内 Q8_0 + lm_head fp16。presence 1.0 时 max_rep 反而从 8 涨到 9：惩罚最先干掉的是领先最少的词，这里恰好是句间换行（只领先 0.2~0.7），句子变短后 60 个 token 里塞进了更多遍复读。复现命令：<code>./build-release/examples/hello_penalty "The meaning of life is" 60 &lt;presence&gt; &lt;frequency&gt;</code>。</p>
+  </div>
+
+  <h2>八、贪心 vs 随机采样（hello_processor）</h2>
+  <div class="card">
+    <table>
+      <tr><th rowspan="2">presence</th><th rowspan="2">frequency</th><th colspan="3">贪心</th><th colspan="3">采样（τ=0.8, top-k 40, top-p 0.95，5 个种子平均）</th></tr>
+      <tr><th>dist-1</th><th>rep-4</th><th>ppl</th><th>dist-1</th><th>rep-4</th><th>ppl</th></tr>
+      <tr><td>0</td><td>0</td><td>0.20</td><td>0.72</td><td>1.49</td><td>0.55</td><td>0.15</td><td>6.82</td></tr>
+      <tr><td>−1.0</td><td>0</td><td>0.20</td><td>0.70</td><td>1.55</td><td><span class="red">0.30</span></td><td><span class="red">0.44</span></td><td>4.02</td></tr>
+      <tr><td>1.0</td><td>0</td><td>0.22</td><td>0.65</td><td>1.55</td><td><b>0.79</b></td><td><b>0.00</b></td><td>10.16</td></tr>
+      <tr><td>3.0</td><td>0</td><td><b>0.80</b></td><td><b>0.04</b></td><td>5.74</td><td>0.92</td><td>0.00</td><td>12.65</td></tr>
+      <tr><td>0</td><td>0.5</td><td>0.22</td><td>0.65</td><td>1.55</td><td><b>0.74</b></td><td><b>0.00</b></td><td>9.42</td></tr>
+      <tr><td>0</td><td>1.5</td><td><b>0.62</b></td><td><b>0.05</b></td><td>4.39</td><td>0.85</td><td>0.00</td><td>10.46</td></tr>
+      <tr><td>1.0</td><td>0.5</td><td>0.22</td><td>0.65</td><td>1.55</td><td>0.86</td><td>0.00</td><td>10.86</td></tr>
+      <tr><td>2.0</td><td>1.0</td><td><b>0.92</b></td><td><b>0.00</b></td><td>8.03</td><td>0.93</td><td>0.00</td><td>13.22</td></tr>
+    </table>
+    <p class="note">dist-1：不同 token 占比，越高越不重复；rep-4：已经出现过的 4-gram 占比，整段复读时接近 1；ppl：<b>不加惩罚</b>的原模型给生成部分打的困惑度，衡量偏离模型分布有多远。</p>
+    <div class="theory"><span class="tag">怎么读这张表</span>
+      <ul>
+        <li><b>同样的参数，贪心和采样表现完全不同</b>：presence 1.0、frequency 0.5 在贪心下毫无作用（rep-4 仍是 0.65），在采样下直接把 rep-4 降到 0。贪心要越过领先幅度（⑫），采样是连续地把概率乘上 \(e^{-\Delta/\tau}\)（⑩），没有阈值。</li>
+        <li><b>ppl 不是越低越好</b>：不加惩罚的贪心 ppl 只有 1.49，每个词都被前文「预言」了，这是复读的标志。惩罚后的贪心 ppl 是 4~8，和不加惩罚的正常采样（6.82）同一量级，说明是离开了退化区，而不是变得不通顺。</li>
+        <li><b>边际收益递减</b>：采样时从 (1.0, 0.5) 加到 (2.0, 1.0)，dist-1 只从 0.86 涨到 0.93，ppl 却从 10.9 涨到 13.2。采样时 0.5~1.0 是性价比最高的区间。</li>
+        <li><b>负值把采样拖回循环</b>：presence −1.0 的种子 1 输出 "It's not so simple as it might seem." 连说 3 遍，rep-4 从 0.15 涨到 0.44。</li>
+      </ul>
+      <p>processor 的开销：55 个词被惩罚时 <code>process()</code> 每次 0.28 µs，贪心 <code>sample()</code> 每次约 170 µs，一次 forward 约 10 ms。复现：<code>./build-release/examples/hello_processor</code>（约 1 分钟）。</p>
+    </div>
+  </div>
+
+  <h2>九、速查</h2>
+  <div class="card">
+    <table>
+      <tr><th></th><th>presence penalty</th><th>frequency penalty</th><th>repetition penalty（未实现）</th></tr>
+      <tr><td>公式</td><td>\(z_j - \alpha\,\mathbb{1}[c_j > 0]\)</td><td>\(z_j - \alpha\, c_j\)</td><td>\(z_j / \theta\)（\(z_j > 0\)），\(z_j \cdot \theta\)（\(z_j \le 0\)）</td></tr>
+      <tr><td>运算</td><td>减法</td><td>减法</td><td>乘除</td></tr>
+      <tr><td>随次数增长</td><td>否，最多扣 \(\alpha\)</td><td>是，线性无上限</td><td>否</td></tr>
+      <tr><td>中性值</td><td>0</td><td>0</td><td>1</td></tr>
+      <tr><td>适合</td><td>长文本、鼓励新话题</td><td>短回复、压制高频复读</td><td>HuggingFace / llama.cpp 生态</td></tr>
+      <tr><td>风险</td><td>只出现过一次的词也被压低</td><td>长文本里功能词被扣到禁用</td><td>效果依赖 logits 的绝对大小</td></tr>
+    </table>
+    <p class="note">调参经验：先确认模型 logits 的尺度。OpenAI 推荐的 0.1~1.0 针对的是他们的模型和温度 1.0；GPT-2 small 贪心时领先幅度动辄 5~10，同样的值几乎无效。随机采样时惩罚会被 \(1/\tau\) 放大，温度 0.8 时扣 1 分概率就只剩 \(e^{-1/0.8} \approx 0.29\)，一般 0.3~0.8 就够。</p>
+  </div>`;
+
+document.addEventListener("DOMContentLoaded", () => {
+  if (!window.renderMathInElement) return;
+  renderMathInElement(document.body, {
+    delimiters: [{ left: "\\[", right: "\\]", display: true }, { left: "\\(", right: "\\)", display: false }],
+    strict: false,
+  });
+});
+</script>
+</body>
+</html>

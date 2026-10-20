@@ -652,16 +652,18 @@ GPT::Trace GPT::forward_trace(std::span<const int> tokens)
 // 这就是为什么 LLM 的「首字延迟」和「每字延迟」要分开看。
 // ---------------------------------------------------------------------------
 std::vector<int> GPT::generate(std::span<const int> prompt, int max_new_tokens, Sampler &sampler,
-                               GenStats *stats, const std::function<void(int)> &on_token)
+                               GenStats *stats, const std::function<void(int)> &on_token,
+                               LogitsProcessor *processor)
 {
     return generate_with([this](std::span<const int> tokens, int start_pos, KVCache &cache)
                          { return forward_impl(tokens, start_pos, &cache, nullptr, /*last_only=*/true); },
-                         prompt, max_new_tokens, sampler, stats, on_token);
+                         prompt, max_new_tokens, sampler, stats, on_token, processor);
 }
 
 std::vector<int> GPT::generate_with(const StepFn &step, std::span<const int> prompt,
                                     int max_new_tokens, Sampler &sampler, GenStats *stats,
-                                    const std::function<void(int)> &on_token)
+                                    const std::function<void(int)> &on_token,
+                                    LogitsProcessor *processor)
 {
     if (prompt.empty())
         fail("generate: prompt 不能为空");
@@ -676,10 +678,17 @@ std::vector<int> GPT::generate_with(const StepFn &step, std::span<const int> pro
     } profile_reset{profile_};
     OpProfile *const prefill_prof = stats ? &stats->prefill_ops : nullptr;
     OpProfile *const decode_prof = stats ? &stats->decode_ops : nullptr;
-    auto timed_sample = [&](const Tensor &lg, OpProfile *prof)
+    if (processor)
+        processor->begin(prompt);
+    auto timed_sample = [&](Tensor &lg, OpProfile *prof)
     {
         ScopedTimer tm(prof ? &prof->sample : nullptr);
-        return sampler.sample(lg.data());
+        if (!processor)
+            return sampler.sample(lg.data());
+        processor->process(lg.data());
+        const int id = sampler.sample(lg.data());
+        processor->accept(id);
+        return id;
     };
 
     // --- prefill ---

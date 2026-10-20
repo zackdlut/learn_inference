@@ -12,6 +12,7 @@
 
 - 数据类型：[`dtype.hpp`](../../include/inference/dtype.hpp)
 - 模型文件：[`infr_format.md`](../infr_format.md)、[`model_file.hpp`](../../include/inference/model_file.hpp)
+- Logits Processor（presence / frequency penalty）：[`logits_processor.md`](../logits_processor.md)（图解版 [`logits_processor.html`](../logits_processor.html)）、[`logits_processor.hpp`](../../include/inference/logits_processor.hpp)
 
 ```cpp
 #include "inference/tensor.hpp"

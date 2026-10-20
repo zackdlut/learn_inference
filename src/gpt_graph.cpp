@@ -206,11 +206,12 @@ Tensor GPT::forward_one_graph(int token, int pos, KVCache &cache)
 
 std::vector<int> GPT::generate_graph(std::span<const int> prompt, int max_new_tokens,
                                      Sampler &sampler, GenStats *stats,
-                                     const std::function<void(int)> &on_token)
+                                     const std::function<void(int)> &on_token,
+                                     LogitsProcessor *processor)
 {
     return generate_with([this](std::span<const int> tokens, int start_pos, KVCache &cache)
                          { return run_graph(tokens, start_pos, &cache, /*last_only=*/true); },
-                         prompt, max_new_tokens, sampler, stats, on_token);
+                         prompt, max_new_tokens, sampler, stats, on_token, processor);
 }
 
 } // namespace inference

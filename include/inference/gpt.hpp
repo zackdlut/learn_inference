@@ -1,5 +1,6 @@
 #pragma once
 #include "inference/graph.hpp"
+#include "inference/logits_processor.hpp"
 #include "inference/model_file.hpp"
 #include "inference/tensor.hpp"
 #include <cstdint>
@@ -263,9 +264,11 @@ class GPT
         OpProfile decode_ops;
     };
 
+    // processor 非空时，每次采样前先用它改写 logits（见 logits_processor.hpp）
     std::vector<int> generate(std::span<const int> prompt, int max_new_tokens, Sampler &sampler,
                               GenStats *stats = nullptr,
-                              const std::function<void(int)> &on_token = {});
+                              const std::function<void(int)> &on_token = {},
+                              LogitsProcessor *processor = nullptr);
 
     // 逐层中间结果，用来和 Python 参考实现对拍
     struct Trace
@@ -295,7 +298,8 @@ class GPT
     // 可以和 generate 的同名项逐项对照
     std::vector<int> generate_graph(std::span<const int> prompt, int max_new_tokens,
                                     Sampler &sampler, GenStats *stats = nullptr,
-                                    const std::function<void(int)> &on_token = {});
+                                    const std::function<void(int)> &on_token = {},
+                                    LogitsProcessor *processor = nullptr);
 
   private:
     GPTConfig cfg_;
@@ -346,7 +350,8 @@ class GPT
     using StepFn = std::function<Tensor(std::span<const int>, int, KVCache &)>;
     std::vector<int> generate_with(const StepFn &step, std::span<const int> prompt,
                                    int max_new_tokens, Sampler &sampler, GenStats *stats,
-                                   const std::function<void(int)> &on_token);
+                                   const std::function<void(int)> &on_token,
+                                   LogitsProcessor *processor);
 };
 
 } // namespace inference

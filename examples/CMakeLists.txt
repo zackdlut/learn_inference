@@ -15,6 +15,8 @@ add_example(hello_graph)
 add_example(hello_perf)
 add_example(hello_gpt)
 add_example(hello_gpt_graph)
+add_example(hello_penalty)
+add_example(hello_processor)
 
 target_compile_definitions(hello_mlp PRIVATE
   INFER_EXAMPLES_DIR="${CMAKE_SOURCE_DIR}/examples"

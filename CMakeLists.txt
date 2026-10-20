@@ -48,6 +48,7 @@ add_library(inference SHARED
     src/tokenizer.cpp
     src/gpt.cpp
     src/gpt_graph.cpp
+    src/logits_processor.cpp
     src/model_file.cpp
     src/mlp.cpp
 )
