@@ -1,4 +1,4 @@
-// 用计算图跑 GPT-2，并和手写版逐位对拍。
+// 用计算图跑 GPT-2，并和手写版逐位、逐算子对拍。
 //
 //   ./build/examples/hello_gpt_graph
 //   ./build/examples/hello_gpt_graph "Once upon a time" 40
@@ -8,6 +8,7 @@
 #include <cstdlib>
 #include <format>
 #include <iostream>
+#include <map>
 #include <string>
 #include <thread>
 #include <vector>
@@ -18,8 +19,11 @@
 #include "inference/ops.hpp"
 #include "inference/tokenizer.hpp"
 
+using inference::Executor;
 using inference::GPT;
 using inference::Graph;
+using inference::KVCache;
+using inference::OpProfile;
 using inference::Sampler;
 using inference::SamplerConfig;
 using inference::Tensor;
@@ -45,6 +49,85 @@ double ms_since(Clock::time_point t0)
     return std::chrono::duration<double, std::milli>(Clock::now() - t0).count();
 }
 
+// 手写版和图版本的 OpProfile 并排打印，每项都是每次 forward 的平均毫秒数
+void compare_profiles(const char *title, const OpProfile &hand, const OpProfile &graph)
+{
+    struct Row
+    {
+        const char *name;
+        double OpProfile::*field;
+    };
+    static constexpr Row rows[] = {
+        {"embed", &OpProfile::embed},         {"layernorm", &OpProfile::layernorm},
+        {"qkv (c_attn)", &OpProfile::qkv},    {"copy (kv)", &OpProfile::copy},
+        {"attention", &OpProfile::attention}, {"attn_proj", &OpProfile::attn_proj},
+        {"residual", &OpProfile::residual},   {"mlp_fc", &OpProfile::mlp_fc},
+        {"gelu", &OpProfile::gelu},           {"mlp_proj", &OpProfile::mlp_proj},
+        {"lm_head", &OpProfile::lm_head},     {"sample", &OpProfile::sample},
+        {"图执行开销", &OpProfile::overhead},
+    };
+    const double nh = std::max(hand.forwards, 1), ng = std::max(graph.forwards, 1);
+    println("\n{}（每次 forward 平均 ms，手写 {} 次 / 图 {} 次）:", title, hand.forwards,
+            graph.forwards);
+    println("  {:<16}{:>10}{:>10}{:>10}", "算子", "手写版", "图版本", "差值");
+    for (const Row &r : rows)
+    {
+        const double h = hand.*r.field / nh, g = graph.*r.field / ng;
+        println("  {:<16}{:>10.3f}{:>10.3f}{:>+10.3f}", r.name, h, g, g - h);
+    }
+    println("  {:<16}{:>10.3f}{:>10.3f}{:>+10.3f}", "合计", hand.total() / nh, graph.total() / ng,
+            graph.total() / ng - hand.total() / nh);
+}
+
+double decode_ms_per_token(const GPT::GenStats &s)
+{
+    // 第一个新 token 来自 prefill，decode 阶段实际只跑了 generated - 1 次 forward
+    return s.generated > 1 ? s.decode_ms / (s.generated - 1) : 0.0;
+}
+
+// 手写版和图版本交替各跑 rounds 轮，各自保留 decode 最快的一轮（减少 CPU 频率、调度带来的抖动），
+// 然后检查 token 是否一致、打印速度和逐算子对照
+void compare_generate(GPT &model, const Tokenizer &tok, const std::vector<int> &ids, int max_new,
+                      const std::string &prompt, int rounds = 3)
+{
+    // 热身：图版本第一次要建 prefill 和 decode 两张图
+    {
+        Sampler s{SamplerConfig{.temperature = 0.0F}};
+        model.generate_graph(ids, 2, s);
+        model.generate(ids, 2, s);
+    }
+
+    GPT::GenStats best_hand, best_graph;
+    std::vector<int> out_hand, out_graph;
+    for (int r = 0; r < rounds; ++r)
+    {
+        Sampler sa{SamplerConfig{.temperature = 0.0F}};
+        Sampler sb{SamplerConfig{.temperature = 0.0F}};
+        GPT::GenStats st_hand, st_graph;
+        out_hand = model.generate(ids, max_new, sa, &st_hand);
+        out_graph = model.generate_graph(ids, max_new, sb, &st_graph);
+        if (r == 0 || st_hand.decode_ms < best_hand.decode_ms)
+            best_hand = st_hand;
+        if (r == 0 || st_graph.decode_ms < best_graph.decode_ms)
+            best_graph = st_graph;
+    }
+
+    const std::vector<int> gen(out_graph.begin() + static_cast<std::ptrdiff_t>(ids.size()),
+                               out_graph.end());
+    println("图版本生成: '{}{}'", prompt, tok.decode(gen));
+    println("token 序列与手写版{}", out_hand == out_graph ? "完全一致" : "不一致！");
+
+    println("\n  （各跑 {} 轮取 decode 最快的一轮）", rounds);
+    println("  {:<8}{:>14}{:>18}", "", "prefill (ms)", "decode (ms/token)");
+    println("  {:<8}{:>14.2f}{:>18.2f}", "手写版", best_hand.prefill_ms,
+            decode_ms_per_token(best_hand));
+    println("  {:<8}{:>14.2f}{:>18.2f}", "图版本", best_graph.prefill_ms,
+            decode_ms_per_token(best_graph));
+
+    compare_profiles("prefill 逐算子对照", best_hand.prefill_ops, best_graph.prefill_ops);
+    compare_profiles("decode 逐算子对照", best_hand.decode_ops, best_graph.decode_ops);
+}
+
 } // namespace
 
 int main(int argc, char **argv)
@@ -64,6 +147,7 @@ int main(int argc, char **argv)
         Tokenizer tok = Tokenizer::load(dir + "/gpt2_vocab.bin", dir + "/gpt2_merges.bin");
         const std::vector<int> ids = tok.encode(prompt);
         GPT model = GPT::load(dir);
+        const auto &cfg = model.config();
         println("prompt: '{}'（{} 个 token）", prompt, ids.size());
 
         // ---------------------------------------------------------------------
@@ -90,33 +174,67 @@ int main(int argc, char **argv)
         }
 
         // ---------------------------------------------------------------------
-        section("3. 带 KV-Cache 的贪心生成：generate_graph vs generate");
+        section("3. Executor 按节点类型计时（直接跑 decode 图 32 步）");
         // ---------------------------------------------------------------------
         {
-            Sampler greedy_a{SamplerConfig{.temperature = 0.0F}};
-            Sampler greedy_b{SamplerConfig{.temperature = 0.0F}};
-            // 先各跑一次热身：图版本第一次要建 prefill 和 decode 两张图
-            model.generate_graph(ids, 2, greedy_b);
-            model.generate(ids, 2, greedy_a);
+            const Graph g = model.build_graph(1, /*last_only=*/true);
+            std::map<std::string, int> type_count;
+            for (const auto &node : g.nodes())
+                ++type_count[node.type];
 
-            GPT::GenStats st_hand, st_graph;
-            const std::vector<int> hand = model.generate(ids, max_new, greedy_a, &st_hand);
-            const std::vector<int> graph = model.generate_graph(ids, max_new, greedy_b, &st_graph);
+            constexpr int kSteps = 32;
+            KVCache cache(cfg, kSteps);
+            Executor exec(g);
+            exec.set_kv_cache(&cache);
+            exec.set_timing(true);
+            std::map<std::string, double> type_ms;
+            double run_ms = 0;
+            for (int pos = 0; pos < kSteps; ++pos)
+            {
+                const int id = ids[static_cast<std::size_t>(pos) % ids.size()];
+                exec.run({{"tokens", Tensor::from({1}, {static_cast<float>(id)})},
+                          {"positions", Tensor::from({1}, {static_cast<float>(pos)})}});
+                for (const auto &[type, ms] : exec.stats().type_ms)
+                    type_ms[type] += ms;
+                run_ms += exec.stats().run_ms;
+            }
 
-            const std::vector<int> gen(graph.begin() + static_cast<std::ptrdiff_t>(ids.size()),
-                                       graph.end());
-            println("图版本生成: '{}{}'", prompt, tok.decode(gen));
-            println("token 序列与手写版{}", hand == graph ? "完全一致" : "不一致！");
-
-            auto per_tok = [](const GPT::GenStats &s)
-            { return s.generated > 1 ? s.decode_ms / (s.generated - 1) : 0.0; };
-            println("\n  {:<8}{:>14}{:>18}", "", "prefill (ms)", "decode (ms/token)");
-            println("  {:<8}{:>14.2f}{:>18.2f}", "手写版", st_hand.prefill_ms, per_tok(st_hand));
-            println("  {:<8}{:>14.2f}{:>18.2f}", "图版本", st_graph.prefill_ms, per_tok(st_graph));
-            println("\n两者调用的是同一批 kernel，时间大头在矩阵乘，所以差距不大。");
-            println("多出来的开销来自 Executor：每个节点都新分配一个输出 Tensor，还要在哈希表里查每个 Value，");
-            println("而手写版全程复用一块工作区、零分配。这正是后面内存规划和算子融合要解决的。");
+            double nodes_ms = 0;
+            for (const auto &[type, ms] : type_ms)
+                nodes_ms += ms;
+            println("  {:<16}{:>8}{:>12}{:>8}", "节点类型", "个数", "ms/步", "占比");
+            for (const auto &[type, ms] : type_ms)
+                println("  {:<16}{:>8}{:>12.3f}{:>7.1f}%", type, type_count[type], ms / kSteps,
+                        ms / run_ms * 100.0);
+            println("  {:<16}{:>8}{:>12.3f}{:>7.1f}%", "Executor 开销", "", (run_ms - nodes_ms) / kSteps,
+                    (run_ms - nodes_ms) / run_ms * 100.0);
+            println("  {:<16}{:>8}{:>12.3f}", "合计", g.nodes().size(), run_ms / kSteps);
+            println("\n按类型只能看出「矩阵乘占大头」：c_attn、attn_proj、c_fc、mlp_proj、lm_head");
+            println("五种矩阵乘都是 linear 类型。要和手写版逐项对照，得按节点名归类 —— 见下面两节。");
         }
+
+        // ---------------------------------------------------------------------
+        section("4. fp32：generate_graph vs generate");
+        // ---------------------------------------------------------------------
+        compare_generate(model, tok, ids, max_new, prompt);
+
+        // ---------------------------------------------------------------------
+        section("5. 量化（层内 Q8_0 + lm_head fp16）：generate_graph vs generate");
+        // ---------------------------------------------------------------------
+        model.quantize_q8_0();
+        {
+            const Graph g = model.build_graph(1, /*last_only=*/true);
+            std::map<std::string, int> type_count;
+            for (const auto &node : g.nodes())
+                ++type_count[node.type];
+            std::string line;
+            for (const auto &[type, n] : type_count)
+                line += std::format(" {}×{}", type, n);
+            println("量化后的 decode 图，节点类型:{}", line);
+            println("结构不变，只是 linear 换成了 linear_q8（48 个）和 linear_f16（lm_head）。\n");
+        }
+        compare_generate(model, tok, ids, max_new, prompt);
+        println("\n这一节可以直接和 hello_gpt 第 7 节（量化后再生成）对比。");
     }
     catch (const std::exception &e)
     {

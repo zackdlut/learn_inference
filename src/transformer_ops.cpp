@@ -31,6 +31,35 @@ std::vector<int> to_ids(const Tensor &t)
     return ids;
 }
 
+// 量化 linear 共用的形状检查：x [M, K]，权重 [N, K]，可选 bias [N] 在 input_shapes[bias_index]
+Shape linear_shape(const char *op, std::span<const Shape> s, std::size_t bias_index)
+{
+    const Shape &x = s[0];
+    const Shape &w = s[1];
+    if (x.size() != 2 || w.size() != 2 || x[1] != w[1])
+    {
+        throw std::runtime_error(
+            std::format("{}: x {} 和权重 {} 对不上，应为 [M, K] 和 [N, K]", op, to_string(x),
+                        to_string(w)));
+    }
+    if (s.size() > bias_index && s[bias_index] != Shape{w[0]})
+    {
+        throw std::runtime_error(
+            std::format("{}: bias 应为 [{}]，拿到 {}", op, w[0], to_string(s[bias_index])));
+    }
+    return Shape{x[0], w[0]};
+}
+
+void add_bias_rows(Tensor &out, const Tensor &bias)
+{
+    const int64 M = out.dim(0), N = out.dim(1);
+    float *o = out.data().data();
+    const float *b = bias.data().data();
+    for (int64 r = 0; r < M; ++r)
+        for (int64 j = 0; j < N; ++j)
+            o[r * N + j] += b[j];
+}
+
 } // namespace
 
 // 词嵌入查表：ids [T] + table [V, C] → [T, C]。位置嵌入也用它，ids 换成位置即可
@@ -169,8 +198,86 @@ class LastRowsOp final : public Op
     }
 };
 
+// Q8_0 权重的 linear：y = x × Wᵀ (+ bias)
+//   输入:  x [M, K]，q int8 [N, K]，scale [N, K/32]，可选 bias [N]
+// 权重拆成 q 和 scale 两个 Value，是因为图里一个 Value 只对应一个 Tensor
+class LinearQ8Op final : public Op
+{
+  public:
+    std::string type() const override
+    {
+        return "linear_q8";
+    }
+    int num_inputs() const override
+    {
+        return -1;
+    }
+    Shape inference_shape(std::span<const Shape> input_shapes,
+                          const Attributes & /*attributes*/) const override
+    {
+        if (input_shapes.size() != 3 && input_shapes.size() != 4)
+            throw std::runtime_error("linear_q8: 输入应为 {x, q, scale} 或 {x, q, scale, bias}");
+        const Shape out = linear_shape("linear_q8", input_shapes, 3);
+        const int64 K = input_shapes[1][1];
+        if (K % kernel::kQ8Block != 0 || input_shapes[2] != Shape{out[1], K / kernel::kQ8Block})
+        {
+            throw std::runtime_error(std::format("linear_q8: K = {} 须是 {} 的倍数，scale 应为 [{}, {}]，拿到 {}",
+                                                 K, kernel::kQ8Block, out[1], K / kernel::kQ8Block,
+                                                 to_string(input_shapes[2])));
+        }
+        return out;
+    }
+    Tensor compute(const OpContext *context) const override
+    {
+        const auto &in = context->inputs;
+        const Tensor x = as_contiguous(*in[0]);
+        const int64 M = x.dim(0), K = x.dim(1), N = in[1]->dim(0);
+        Tensor out = Tensor::zeros({M, N});
+        kernel::matmul_nt_q8_0(x.data(), in[1]->data_as<std::int8_t>().data(),
+                               in[2]->data().data(), out.data(), M, N, K);
+        if (in.size() == 4)
+            add_bias_rows(out, *in[3]);
+        return out;
+    }
+};
+
+// fp16 权重的 linear，激活保持 fp32：y = x × Wᵀ (+ bias)
+//   输入:  x [M, K]，w fp16 [N, K]，可选 bias [N]
+class LinearF16Op final : public Op
+{
+  public:
+    std::string type() const override
+    {
+        return "linear_f16";
+    }
+    int num_inputs() const override
+    {
+        return -1;
+    }
+    Shape inference_shape(std::span<const Shape> input_shapes,
+                          const Attributes & /*attributes*/) const override
+    {
+        if (input_shapes.size() != 2 && input_shapes.size() != 3)
+            throw std::runtime_error("linear_f16: 输入应为 {x, w} 或 {x, w, bias}");
+        return linear_shape("linear_f16", input_shapes, 2);
+    }
+    Tensor compute(const OpContext *context) const override
+    {
+        const auto &in = context->inputs;
+        const Tensor x = as_contiguous(*in[0]);
+        const int64 M = x.dim(0), K = x.dim(1), N = in[1]->dim(0);
+        Tensor out = Tensor::zeros({M, N});
+        kernel::matmul_nt_f16(x.data(), in[1]->data_as<std::uint16_t>().data(), out.data(), M, N, K);
+        if (in.size() == 3)
+            add_bias_rows(out, *in[2]);
+        return out;
+    }
+};
+
 REGISTER_OP(EmbeddingOp)
 REGISTER_OP(AttentionQKVOp)
 REGISTER_OP(LastRowsOp)
+REGISTER_OP(LinearQ8Op)
+REGISTER_OP(LinearF16Op)
 
 } // namespace inference

@@ -124,20 +124,27 @@ bool Tensor::is_contiguous() const noexcept
 //=============================================================================
 std::span<float> Tensor::data()
 {
-    if (!is_contiguous())
-    {
-        fail("tensor is not contiguous");
-    }
+    check_typed_access(DType::FP32);
     return {raw_ptr() + offset_, static_cast<std::size_t>(numel_)};
 }
 
 std::span<const float> Tensor::data() const
 {
+    check_typed_access(DType::FP32);
+    return {raw_ptr() + offset_, static_cast<std::size_t>(numel_)};
+}
+
+void Tensor::check_typed_access(DType want) const
+{
     if (!is_contiguous())
     {
         fail("tensor is not contiguous");
     }
-    return {raw_ptr() + offset_, static_cast<std::size_t>(numel_)};
+    // 按错的类型解释同一块内存，读到的是乱码；int8 张量当 float 读还会越界 4 倍
+    if (dtype_ != want)
+    {
+        fail(std::format("dtype 是 {}，不能按 {} 访问", dtype_name(dtype_), dtype_name(want)));
+    }
 }
 
 int64 Tensor::offset_of(std::span<const int64> index) const
@@ -297,6 +304,10 @@ Tensor Tensor::contiguous() const
     {
         return *this; // 已经紧凑，不用白拷一遍
     }
+    if (dtype_ != DType::FP32)
+    {
+        fail(std::format("contiguous: 暂不支持 {} 张量的非连续视图", dtype_name(dtype_)));
+    }
     Tensor out = zeros(shape_, dtype_);
     std::span<float> dst = out.data();
 
@@ -327,6 +338,8 @@ std::string Tensor::to_string() const
     std::string out = meta_string() + "\n";
     if (numel_ == 0)
         return out + "[]";
+    if (dtype_ != DType::FP32)
+        return out + "（非 fp32，不打印数据）";
 
     // 逐元素遍历（用 offset_of 所以非连续张量也能正确打印），
     // 每换一行插一个换行符，方便肉眼核对矩阵。

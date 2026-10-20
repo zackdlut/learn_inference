@@ -3,10 +3,13 @@
 #include "inference/op.hpp"
 #include "inference/tensor.hpp"
 
+#include <chrono>
 #include <format>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <unordered_map>
+#include <utility>
 
 namespace inference
 {
@@ -16,6 +19,28 @@ namespace
 [[noreturn]] void fail(const std::string &msg)
 {
     throw std::runtime_error("[infer::GPT] " + msg);
+}
+
+// 节点名 → OpProfile 里的哪一项，和 forward_impl 里各个 ScopedTimer 的划分对齐。
+// 按节点名而不是节点类型分：5 种矩阵乘的类型都是 linear（或 linear_q8），只看类型分不开。
+double OpProfile::*profile_field(std::string_view name)
+{
+    if (const auto dot = name.find('.'); dot != std::string_view::npos)
+        name = name.substr(dot + 1); // 去掉 "h3." 这样的层前缀
+    static constexpr std::pair<std::string_view, double OpProfile::*> kTable[] = {
+        {"tok_emb", &OpProfile::embed},      {"pos_emb", &OpProfile::embed},
+        {"embed", &OpProfile::embed},        {"ln_1", &OpProfile::layernorm},
+        {"ln_2", &OpProfile::layernorm},     {"ln_f", &OpProfile::layernorm},
+        {"c_attn", &OpProfile::qkv},         {"attn", &OpProfile::attention},
+        {"attn_proj", &OpProfile::attn_proj}, {"res_attn", &OpProfile::residual},
+        {"res_mlp", &OpProfile::residual},   {"c_fc", &OpProfile::mlp_fc},
+        {"gelu", &OpProfile::gelu},          {"mlp_proj", &OpProfile::mlp_proj},
+        {"last", &OpProfile::lm_head},       {"lm_head", &OpProfile::lm_head},
+    };
+    for (const auto &[key, field] : kTable)
+        if (key == name)
+            return field;
+    return &OpProfile::overhead;
 }
 } // namespace
 
@@ -35,12 +60,15 @@ namespace
 //
 //   last_rows(x, 1)（只在 last_only 时）→ layer_norm(ln_f) → linear(wte) → logits
 //
+// 量化之后，图的结构不变，只是矩阵乘节点换了类型：
+//   Q8_0 的矩阵  →  linear_q8(x, q, scale, bias)
+//   fp16 lm_head →  linear_f16(x, w16)
+// 选哪种节点完全由权重当前的存储决定，和 forward_impl 里 matmul_weight 的分支一一对应。
+//
 // 权重 Tensor 内部是 shared_ptr，add_weight 只是多一个引用，建多少张图都不拷贝权重数据。
 // ---------------------------------------------------------------------------
 Graph GPT::build_graph(int T, bool last_only) const
 {
-    if (quantized_)
-        fail("build_graph: 计算图版本只支持 fp32 权重，量化后 fp32 权重已被释放");
     if (T <= 0 || T > cfg_.n_ctx)
         fail(std::format("build_graph: T = {} 不在 [1, {}] 内", T, cfg_.n_ctx));
 
@@ -61,28 +89,37 @@ Graph GPT::build_graph(int T, bool last_only) const
         const Layer &L = layers_[static_cast<std::size_t>(li)];
         const std::string p = std::format("h{}.", li);
         const auto w = [&](const char *name, const Tensor &t) { return g.add_weight(p + name, t); };
+        // 带 bias 的矩阵乘：有 Q8_0 版本就用 linear_q8，否则用 fp32 的 linear
+        const auto linear = [&](const std::string &name, ValueId in, const Tensor &wf,
+                                const QMatrixQ8 &wq, const Tensor &bias)
+        {
+            const std::string n = p + name;
+            if (!wq.empty())
+                return g.add_node("linear_q8", n,
+                                  {in, g.add_weight(n + ".q", wq.q), g.add_weight(n + ".s", wq.scale),
+                                   g.add_weight(n + ".b", bias)});
+            return g.add_node("linear", n,
+                              {in, g.add_weight(n + ".w", wf), g.add_weight(n + ".b", bias)});
+        };
 
         // 注意力子层
         ValueId h = g.add_node("layer_norm", p + "ln_1", {x, w("ln_1.w", L.ln1_w), w("ln_1.b", L.ln1_b)},
                                ln_attr());
-        const ValueId qkv =
-            g.add_node("linear", p + "c_attn", {h, w("c_attn.w", L.attn_w), w("c_attn.b", L.attn_b)});
+        const ValueId qkv = linear("c_attn", h, L.attn_w, L.attn_wq, L.attn_b);
         const ValueId att = g.add_node("attention_qkv", p + "attn", {qkv, positions},
                                        Attributes{}
                                            .set("n_head", std::int64_t{cfg_.n_head})
                                            .set("layer", std::int64_t{li}));
         const ValueId att_proj =
-            g.add_node("linear", p + "attn_proj",
-                       {att, w("attn_proj.w", L.attn_proj_w), w("attn_proj.b", L.attn_proj_b)});
+            linear("attn_proj", att, L.attn_proj_w, L.attn_proj_wq, L.attn_proj_b);
         x = g.add_node("add", p + "res_attn", {x, att_proj});
 
         // MLP 子层
         h = g.add_node("layer_norm", p + "ln_2", {x, w("ln_2.w", L.ln2_w), w("ln_2.b", L.ln2_b)},
                        ln_attr());
-        const ValueId fc = g.add_node("linear", p + "c_fc", {h, w("c_fc.w", L.fc_w), w("c_fc.b", L.fc_b)});
+        const ValueId fc = linear("c_fc", h, L.fc_w, L.fc_wq, L.fc_b);
         const ValueId act = g.add_node("gelu", p + "gelu", {fc});
-        const ValueId mlp_proj =
-            g.add_node("linear", p + "mlp_proj", {act, w("mlp_proj.w", L.proj_w), w("mlp_proj.b", L.proj_b)});
+        const ValueId mlp_proj = linear("mlp_proj", act, L.proj_w, L.proj_wq, L.proj_b);
         x = g.add_node("add", p + "res_mlp", {x, mlp_proj});
     }
 
@@ -92,8 +129,19 @@ Graph GPT::build_graph(int T, bool last_only) const
     const ValueId h = g.add_node("layer_norm", "ln_f",
                                  {x, g.add_weight("ln_f.w", lnf_w_), g.add_weight("ln_f.b", lnf_b_)},
                                  ln_attr());
-    // weight tying：lm_head 直接复用词嵌入那个 Value，wte 在图里只登记一次
-    const ValueId logits = g.add_node("linear", "lm_head", {h, wte});
+    // 没量化时 weight tying：lm_head 直接复用词嵌入那个 Value，wte 在图里只登记一次。
+    // 量化后 wte 仍是 fp32（给 embedding 查表），lm_head 另用一份压缩过的
+    ValueId logits = -1;
+    if (!lm_head_f16_.empty())
+        logits = g.add_node("linear_f16", "lm_head", {h, g.add_weight("lm_head.f16", lm_head_f16_)});
+    else if (!lm_head_q_.empty())
+        logits = g.add_node("linear_q8", "lm_head",
+                            {h, g.add_weight("lm_head.q", lm_head_q_.q),
+                             g.add_weight("lm_head.s", lm_head_q_.scale)});
+    else if (lm_head_f32_.numel() > 0)
+        logits = g.add_node("linear", "lm_head", {h, g.add_weight("lm_head.w", lm_head_f32_)});
+    else
+        logits = g.add_node("linear", "lm_head", {h, wte});
     g.mark_output(logits);
     g.finalize();
     return g;
@@ -111,6 +159,10 @@ Tensor GPT::run_graph(std::span<const int> tokens, int start_pos, KVCache *cache
     if (!slot)
         slot = std::make_unique<Graph>(build_graph(T, last_only));
 
+    using Clock = std::chrono::steady_clock;
+    OpProfile *const prof = profile_;
+    const Clock::time_point t0 = prof ? Clock::now() : Clock::time_point{};
+
     Tensor tok = Tensor::zeros({T});
     Tensor pos = Tensor::zeros({T});
     for (int t = 0; t < T; ++t)
@@ -121,7 +173,24 @@ Tensor GPT::run_graph(std::span<const int> tokens, int start_pos, KVCache *cache
 
     Executor exec(*slot);
     exec.set_kv_cache(cache);
-    return exec.run({{"tokens", tok}, {"positions", pos}})[0];
+    exec.set_timing(prof != nullptr);
+    Tensor logits = exec.run({{"tokens", tok}, {"positions", pos}})[0];
+
+    if (prof)
+    {
+        // 整个 run_graph（组输入 + run）减去各节点 compute 之和，剩下的就是图执行本身的开销
+        double nodes_ms = 0;
+        const std::vector<double> &node_ms = exec.stats().node_ms;
+        for (const Node &node : slot->nodes())
+        {
+            const double ms = node_ms[static_cast<std::size_t>(node.id)];
+            prof->*profile_field(node.name) += ms;
+            nodes_ms += ms;
+        }
+        prof->overhead += std::chrono::duration<double, std::milli>(Clock::now() - t0).count() - nodes_ms;
+        ++prof->forwards;
+    }
+    return logits;
 }
 
 Tensor GPT::forward_graph(std::span<const int> tokens)

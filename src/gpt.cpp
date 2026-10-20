@@ -74,7 +74,8 @@ void matmul_weight(const float *a, const Tensor &w, const QMatrixQ8 &wq, float *
     const std::span<const float> as{a, static_cast<std::size_t>(M * K)};
     const std::span<float> os{out, static_cast<std::size_t>(M * N)};
     if (!wq.empty())
-        kernel::matmul_nt_q8_0(as, wq.q.data(), wq.scale.data(), os, M, N, K);
+        kernel::matmul_nt_q8_0(as, wq.q.data_as<std::int8_t>().data(), wq.scale.data().data(), os,
+                               M, N, K);
     else
         kernel::matmul_nt_f32(as, w.data(), os, M, N, K);
 }
@@ -519,7 +520,8 @@ Tensor GPT::forward_impl(std::span<const int> tokens, int start_pos, KVCache *ca
     Tensor logits = Tensor::zeros({rows, cfg_.n_vocab});
     const std::span<const float> last_span{last, static_cast<std::size_t>(rows * C)};
     if (!lm_head_f16_.empty())
-        kernel::matmul_nt_f16(last_span, lm_head_f16_.data(), logits.data(), rows, cfg_.n_vocab, C);
+        kernel::matmul_nt_f16(last_span, lm_head_f16_.data_as<std::uint16_t>().data(), logits.data(),
+                              rows, cfg_.n_vocab, C);
     else
         matmul_weight(last, lm_head_f32_.numel() ? lm_head_f32_ : wte_, lm_head_q_,
                       logits.data().data(), rows, cfg_.n_vocab, C);
@@ -539,14 +541,15 @@ QMatrixQ8 QMatrixQ8::quantize(const Tensor &w)
     QMatrixQ8 m;
     m.rows = w.dim(0);
     m.cols = w.dim(1);
-    m.q.resize(static_cast<std::size_t>(m.rows * m.cols));
-    m.scale.resize(static_cast<std::size_t>(m.rows * m.cols / kernel::kQ8Block));
+    const int64 nb = m.cols / kernel::kQ8Block;
+    m.q = Tensor::zeros({m.rows, m.cols}, DType::INT8);
+    m.scale = Tensor::zeros({m.rows, nb});
     const Tensor src = w.contiguous();
     const float *s = src.data().data();
-    const int64 nb = m.cols / kernel::kQ8Block;
+    std::int8_t *q = m.q.data_as<std::int8_t>().data();
+    float *sc = m.scale.data().data();
     for (int64 r = 0; r < m.rows; ++r)
-        kernel::quantize_row_q8_0(s + r * m.cols, m.q.data() + r * m.cols, m.scale.data() + r * nb,
-                                  m.cols);
+        kernel::quantize_row_q8_0(s + r * m.cols, q + r * m.cols, sc + r * nb, m.cols);
     return m;
 }
 
@@ -555,7 +558,8 @@ namespace
 Tensor dequantize(const QMatrixQ8 &m)
 {
     Tensor t = Tensor::zeros({m.rows, m.cols});
-    kernel::dequantize_row_q8_0(m.q.data(), m.scale.data(), t.data().data(), m.rows * m.cols);
+    kernel::dequantize_row_q8_0(m.q.data_as<std::int8_t>().data(), m.scale.data().data(),
+                                t.data().data(), m.rows * m.cols);
     return t;
 }
 } // namespace
@@ -596,9 +600,9 @@ void GPT::quantize(const QuantOptions &opt)
     case QuantOptions::LmHead::fp16:
     {
         const Tensor wte = wte_.contiguous();
-        lm_head_f16_.resize(wte.data().size());
-        kernel::convert_f32_to_f16(wte.data().data(), lm_head_f16_.data(),
-                                   static_cast<int64>(lm_head_f16_.size()));
+        lm_head_f16_ = Tensor::zeros(wte.shape(), DType::FP16);
+        kernel::convert_f32_to_f16(wte.data().data(), lm_head_f16_.data_as<std::uint16_t>().data(),
+                                   lm_head_f16_.numel());
         break;
     }
     case QuantOptions::LmHead::q8_0:
@@ -609,6 +613,8 @@ void GPT::quantize(const QuantOptions &opt)
         break;
     }
     quantized_ = true;
+    // 之前建好的图引用的是 fp32 权重：既会算错版本，又会让刚释放的 fp32 权重继续占着内存
+    graphs_.clear();
 }
 
 Tensor GPT::forward(std::span<const int> tokens)

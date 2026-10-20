@@ -2,6 +2,7 @@
 #include "inference/op.hpp"
 #include "inference/tensor.hpp"
 
+#include <chrono>
 #include <deque>
 #include <format>
 #include <span>
@@ -311,6 +312,12 @@ std::vector<Tensor> Executor::run(const std::unordered_map<std::string, Tensor> 
     }
 
     stats_ = Stats{};
+    using Clock = std::chrono::steady_clock;
+    const auto ms_since = [](Clock::time_point t0)
+    { return std::chrono::duration<double, std::milli>(Clock::now() - t0).count(); };
+    const Clock::time_point run_t0 = timing_ ? Clock::now() : Clock::time_point{};
+    if (timing_)
+        stats_.node_ms.assign(g.nodes().size(), 0.0);
     std::unordered_map<ValueId, Tensor> live;
     std::unordered_map<ValueId, int> remaining;
 
@@ -380,7 +387,14 @@ std::vector<Tensor> Executor::run(const std::unordered_map<std::string, Tensor> 
         context.kv_cache = kv_cache_;
         // 执行 Op 获得 output Tensor
         const Op &op = reg.get(node.type);
+        const Clock::time_point node_t0 = timing_ ? Clock::now() : Clock::time_point{};
         Tensor output = op.compute(&context);
+        if (timing_)
+        {
+            const double dt = ms_since(node_t0);
+            stats_.node_ms[static_cast<std::size_t>(nid)] = dt;
+            stats_.type_ms[node.type] += dt;
+        }
         // 检查 计算出的output Tensor Shape 是否和output.shape 一致
         if (output.shape() != g.value(node.output).shape)
         {
@@ -428,6 +442,8 @@ std::vector<Tensor> Executor::run(const std::unordered_map<std::string, Tensor> 
         }
         result.push_back(it->second);
     }
+    if (timing_)
+        stats_.run_ms = ms_since(run_t0);
     return result;
 }
 

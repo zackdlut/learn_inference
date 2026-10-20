@@ -167,22 +167,26 @@ struct OpProfile
     double mlp_proj = 0;
     double lm_head = 0;
     double sample = 0;
-    int forwards = 0; // forward_impl 被调用的次数
+    // 只有计算图版本有：Executor 自身的耗时（组输入、查表、校验形状、释放中间结果），手写版恒为 0。
+    // 另外图版本的 copy 恒为 0：写 KV-Cache 在 attention_qkv 节点里，计入 attention
+    double overhead = 0;
+    int forwards = 0; // forward 被调用的次数
 
     double total() const noexcept
     {
         return embed + layernorm + qkv + copy + attention + attn_proj + residual + mlp_fc + gelu +
-               mlp_proj + lm_head + sample;
+               mlp_proj + lm_head + sample + overhead;
     }
 };
 
-// Q8_0 量化后的矩阵 [rows, cols]：每行每 32 个数一组，q 存 int8，scale 存每组的缩放系数
+// Q8_0 量化后的矩阵 [rows, cols]：每行每 32 个数一组，q 存 int8，scale 存每组的缩放系数。
+// 用 Tensor 存而不是 std::vector，计算图可以直接把它们登记成权重（共享内存，不拷贝）。
 struct QMatrixQ8
 {
     std::int64_t rows = 0;
     std::int64_t cols = 0;
-    std::vector<std::int8_t> q;  // rows × cols
-    std::vector<float> scale;    // rows × cols / 32
+    Tensor q;     // int8 [rows, cols]
+    Tensor scale; // fp32 [rows, cols / 32]
 
     static QMatrixQ8 quantize(const Tensor &w); // w 是连续的 [rows, cols]，cols 是 32 的倍数
     bool empty() const noexcept
@@ -191,7 +195,8 @@ struct QMatrixQ8
     }
     std::size_t bytes() const noexcept
     {
-        return q.size() + scale.size() * sizeof(float);
+        return static_cast<std::size_t>(q.numel()) +
+               static_cast<std::size_t>(scale.numel()) * sizeof(float);
     }
 };
 
@@ -280,13 +285,14 @@ class GPT
     //
     // Graph 的输入形状是建图时定死的，所以每种 (T, last_only) 各建一张并缓存起来：
     // decode 恒为 T=1，只建一次；prefill 每种 prompt 长度建一次。
-    // 只支持 fp32 权重，量化之后调用会报错。
+    // 量化之后矩阵乘节点换成 linear_q8 / linear_f16（quantize() 会清掉已缓存的 fp32 图）。
 
     // tokens 和 positions 两个输入都是 [T]；last_only 时只输出最后一个位置的 logits [1, n_vocab]
     Graph build_graph(int T, bool last_only) const;
     Tensor forward_graph(std::span<const int> tokens);
     Tensor forward_one_graph(int token, int pos, KVCache &cache);
-    // 按算子的耗时统计（GenStats::*_ops）只有手写版有；这里只填 prefill_ms / decode_ms 和采样耗时
+    // stats 非空时 Executor 给每个节点计时，按节点名归到 GenStats::*_ops 的对应项，
+    // 可以和 generate 的同名项逐项对照
     std::vector<int> generate_graph(std::span<const int> prompt, int max_new_tokens,
                                     Sampler &sampler, GenStats *stats = nullptr,
                                     const std::function<void(int)> &on_token = {});
@@ -306,7 +312,7 @@ class GPT
         QMatrixQ8 attn_wq, attn_proj_wq, fc_wq, proj_wq;
     };
     // 量化之后 lm_head 用下面三者之一（都是 [n_vocab, C]），都为空时直接用 wte_
-    std::vector<std::uint16_t> lm_head_f16_;
+    Tensor lm_head_f16_; // fp16 [n_vocab, C]
     QMatrixQ8 lm_head_q_;
     Tensor lm_head_f32_; // weight_only 实验：量化再反量化的 wte，不影响词嵌入查表
     bool quantized_ = false;

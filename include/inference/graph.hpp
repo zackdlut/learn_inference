@@ -2,6 +2,7 @@
 
 #include "inference/op.hpp"
 #include "inference/tensor.hpp"
+#include <map>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -105,12 +106,21 @@ class Executor
     {
         kv_cache_ = cache;
     }
+    // 打开后 run() 给每个节点的 compute() 计时，结果在 stats() 的 node_ms / type_ms / run_ms 里
+    void set_timing(bool on) noexcept
+    {
+        timing_ = on;
+    }
 
     struct Stats
     {
         std::size_t peak_bytes = 0;
         std::size_t total_bytes = 0;
         int nodes_run = 0;
+        // 以下只在 set_timing(true) 时填，单位毫秒
+        std::vector<double> node_ms;           // 按节点 id 索引，只含 compute() 本身
+        std::map<std::string, double> type_ms; // 按节点类型（"linear"、"gelu" ...）汇总
+        double run_ms = 0;                     // 整个 run()。减去各节点之和就是 Executor 自身的开销
     };
     const Stats &stats() const noexcept
     {
@@ -120,6 +130,7 @@ class Executor
   private:
     const Graph *g_;
     bool reuse_ = true;
+    bool timing_ = false;
     KVCache *kv_cache_ = nullptr;
     Stats stats_;
 };

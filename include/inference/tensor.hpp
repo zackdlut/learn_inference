@@ -89,8 +89,22 @@ class Tensor
     //=============================================================================
     // 获取张量数据
     //=============================================================================
+    // 只能用在 fp32 张量上；其它 dtype 用 data_as<T>()
     [[nodiscard]] std::span<float> data();
     [[nodiscard]] std::span<const float> data() const;
+
+    // 按真实元素类型访问，T 必须和 dtype 对应（见 dtype_of）。量化权重（int8 / fp16）走这里
+    template <class T> [[nodiscard]] std::span<T> data_as()
+    {
+        check_typed_access(dtype_of<std::remove_const_t<T>>());
+        return {reinterpret_cast<T *>(data_.get()) + offset_, static_cast<std::size_t>(numel_)};
+    }
+    template <class T> [[nodiscard]] std::span<const T> data_as() const
+    {
+        check_typed_access(dtype_of<std::remove_const_t<T>>());
+        return {reinterpret_cast<const T *>(data_.get()) + offset_,
+                static_cast<std::size_t>(numel_)};
+    }
 
     // 获取张量元素
     template <std::integral... Index> [[nodiscard]] float &operator()(Index... index)
@@ -139,6 +153,7 @@ class Tensor
         return reinterpret_cast<const float *>(data_.get());
     }
     [[nodiscard]] int64 offset_of(std::span<const int64> index) const;
+    void check_typed_access(DType want) const;
 };
 
 } // namespace inference

@@ -1,5 +1,6 @@
 #include "inference/gpt.hpp"
 #include "inference/graph.hpp"
+#include "inference/kernel.hpp"
 #include "inference/ops.hpp"
 #include "minitest.hpp"
 
@@ -8,10 +9,12 @@
 #include <vector>
 
 using inference::Attributes;
+using inference::DType;
 using inference::Executor;
 using inference::GPTConfig;
 using inference::Graph;
 using inference::KVCache;
+using inference::QMatrixQ8;
 using inference::Shape;
 using inference::Tensor;
 using inference::ValueId;
@@ -329,4 +332,60 @@ TEST(graph_attention_qkv_kv_cache_incremental)
         CHECK(ops::max_abs_diff(row, full.slice(0, p, p + 1).contiguous()) < 1e-5F);
     }
     CHECK(cache.length() == T);
+}
+
+TEST(tensor_typed_access_checks_dtype)
+{
+    Tensor q = Tensor::zeros({2, 32}, DType::INT8);
+    CHECK(q.data_as<std::int8_t>().size() == 64);
+    CHECK_THROWS(q.data());
+    CHECK_THROWS(q.data_as<std::uint16_t>());
+    CHECK_THROWS(Tensor::zeros({2}).data_as<std::int8_t>());
+}
+
+// linear_q8 应和直接调 kernel 逐位一致；和 fp32 linear 的差距是量化误差，应很小
+TEST(graph_linear_q8_matches_kernel)
+{
+    constexpr int M = 3, N = 5, K = 64;
+    const Tensor w = wave({N, K}, 0.3F);
+    const Tensor b = wave({N}, 1.7F);
+    const Tensor x = wave({M, K}, 2.9F);
+    const QMatrixQ8 wq = QMatrixQ8::quantize(w);
+
+    Graph g;
+    const ValueId xi = g.add_input("x", {M, K});
+    const ValueId y = g.add_node("linear_q8", "fc",
+                                 {xi, g.add_weight("q", wq.q), g.add_weight("s", wq.scale),
+                                  g.add_weight("b", b)});
+    g.mark_output(y);
+    g.finalize();
+    const Tensor got = Executor(g).run({{"x", x}})[0];
+
+    Tensor want = Tensor::zeros({M, N});
+    inference::kernel::matmul_nt_q8_0(x.data(), wq.q.data_as<std::int8_t>().data(),
+                                      wq.scale.data().data(), want.data(), M, N, K);
+    for (int r = 0; r < M; ++r)
+        for (int j = 0; j < N; ++j)
+            want.data()[static_cast<std::size_t>(r * N + j)] += b.data()[static_cast<std::size_t>(j)];
+    CHECK(ops::max_abs_diff(got, want) == 0.0F);
+    CHECK(ops::max_abs_diff(got, ops::linear(x, w, b)) < 0.1F);
+}
+
+TEST(graph_linear_f16_matches_fp32)
+{
+    constexpr int M = 2, N = 4, K = 16;
+    const Tensor w = wave({N, K}, 0.9F);
+    const Tensor x = wave({M, K}, 0.1F);
+    Tensor w16 = Tensor::zeros({N, K}, DType::FP16);
+    inference::kernel::convert_f32_to_f16(w.data().data(), w16.data_as<std::uint16_t>().data(),
+                                          N * K);
+
+    Graph g;
+    const ValueId xi = g.add_input("x", {M, K});
+    const ValueId y = g.add_node("linear_f16", "head", {xi, g.add_weight("w", w16)});
+    g.mark_output(y);
+    g.finalize();
+    CHECK(g.value(y).shape == Shape({M, N}));
+    const Tensor got = Executor(g).run({{"x", x}})[0];
+    CHECK(ops::max_abs_diff(got, ops::linear(x, w)) < 1e-2F);
 }
