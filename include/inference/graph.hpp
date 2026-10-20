@@ -100,6 +100,11 @@ class Executor
     {
         reuse_ = reuse;
     }
+    // 之后的 run() 都把这个缓存交给算子（attention_qkv 用它读写历史 K/V），nullptr 表示不用缓存
+    void set_kv_cache(KVCache *cache) noexcept
+    {
+        kv_cache_ = cache;
+    }
 
     struct Stats
     {
@@ -115,6 +120,7 @@ class Executor
   private:
     const Graph *g_;
     bool reuse_ = true;
+    KVCache *kv_cache_ = nullptr;
     Stats stats_;
 };
 

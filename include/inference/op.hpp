@@ -8,6 +8,8 @@
 namespace inference
 {
 
+class KVCache;
+
 using Attribute = std::variant<std::int64_t, float, std::string>;
 class Attributes
 {
@@ -36,6 +38,8 @@ struct OpContext
 {
     std::vector<const Tensor *> inputs;
     const Attributes *attributes = nullptr;
+    // 跨多次 run() 保留的状态。节点属性是建图时定死的，每步都在变的缓存只能从这里传进来
+    KVCache *kv_cache = nullptr;
 };
 
 class Op

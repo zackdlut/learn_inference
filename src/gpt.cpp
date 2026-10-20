@@ -648,6 +648,15 @@ GPT::Trace GPT::forward_trace(std::span<const int> tokens)
 std::vector<int> GPT::generate(std::span<const int> prompt, int max_new_tokens, Sampler &sampler,
                                GenStats *stats, const std::function<void(int)> &on_token)
 {
+    return generate_with([this](std::span<const int> tokens, int start_pos, KVCache &cache)
+                         { return forward_impl(tokens, start_pos, &cache, nullptr, /*last_only=*/true); },
+                         prompt, max_new_tokens, sampler, stats, on_token);
+}
+
+std::vector<int> GPT::generate_with(const StepFn &step, std::span<const int> prompt,
+                                    int max_new_tokens, Sampler &sampler, GenStats *stats,
+                                    const std::function<void(int)> &on_token)
+{
     if (prompt.empty())
         fail("generate: prompt 不能为空");
 
@@ -670,7 +679,7 @@ std::vector<int> GPT::generate(std::span<const int> prompt, int max_new_tokens, 
     // --- prefill ---
     profile_ = prefill_prof;
     const auto t0 = Clock::now();
-    Tensor logits = forward_impl(prompt, 0, &cache, nullptr, /*last_only=*/true);
+    Tensor logits = step(prompt, 0, cache);
     const double prefill_ms = ms_since(t0);
 
     std::vector<int> out(prompt.begin(), prompt.end());
@@ -689,7 +698,8 @@ std::vector<int> GPT::generate(std::span<const int> prompt, int max_new_tokens, 
         if (i + 1 == budget)
             break;
         const int pos = static_cast<int>(out.size()) - 1;
-        logits = forward_one(next, pos, cache);
+        const int one[1] = {next};
+        logits = step(one, pos, cache);
         next = timed_sample(logits, decode_prof);
     }
 

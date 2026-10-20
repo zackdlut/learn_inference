@@ -1,12 +1,17 @@
+#include "inference/gpt.hpp"
 #include "inference/graph.hpp"
 #include "inference/ops.hpp"
 #include "minitest.hpp"
 
+#include <cmath>
 #include <string>
 #include <vector>
 
+using inference::Attributes;
 using inference::Executor;
+using inference::GPTConfig;
 using inference::Graph;
+using inference::KVCache;
 using inference::Shape;
 using inference::Tensor;
 using inference::ValueId;
@@ -14,6 +19,37 @@ namespace ops = inference::ops;
 
 namespace
 {
+
+// 确定性的「随机」数据，不依赖 <random>，换机器结果一致
+Tensor wave(Shape shape, float phase)
+{
+    Tensor t = Tensor::zeros(std::move(shape));
+    auto d = t.data();
+    for (std::size_t i = 0; i < d.size(); ++i)
+        d[i] = std::sin(static_cast<float>(i) * 0.37F + phase);
+    return t;
+}
+
+Tensor positions(int start, int T)
+{
+    Tensor t = Tensor::zeros({T});
+    for (int i = 0; i < T; ++i)
+        t.data()[static_cast<std::size_t>(i)] = static_cast<float>(start + i);
+    return t;
+}
+
+Graph attention_graph(int T, int C, int n_head)
+{
+    Graph g;
+    const ValueId qkv = g.add_input("qkv", {T, 3 * C});
+    const ValueId pos = g.add_input("positions", {T});
+    const ValueId y = g.add_node("attention_qkv", "attn", {qkv, pos},
+                                 Attributes{}.set("n_head", std::int64_t{n_head}).set("layer",
+                                                                                      std::int64_t{0}));
+    g.mark_output(y);
+    g.finalize();
+    return g;
+}
 
 Graph tiny_add_graph()
 {
@@ -215,4 +251,82 @@ TEST(graph_finalize_idempotent)
     g.finalize();
     const auto order2 = std::vector<int>(g.exec_order().begin(), g.exec_order().end());
     CHECK(order1 == order2);
+}
+
+TEST(graph_embedding_matches_ops)
+{
+    const Tensor table = wave({10, 4}, 0.5F);
+    Graph g;
+    const ValueId ids = g.add_input("ids", {3});
+    const ValueId w = g.add_weight("table", table);
+    const ValueId y = g.add_node("embedding", "emb", {ids, w});
+    g.mark_output(y);
+    g.finalize();
+    CHECK(g.value(y).shape == Shape({3, 4}));
+
+    const std::vector<Tensor> out = Executor(g).run({{"ids", Tensor::from({3}, {7, 0, 7})}});
+    const int want_ids[] = {7, 0, 7};
+    CHECK(ops::max_abs_diff(out[0], ops::embedding(table, want_ids)) == 0.0F);
+}
+
+TEST(graph_last_rows)
+{
+    Graph g;
+    const ValueId x = g.add_input("x", {4, 3});
+    const ValueId y = g.add_node("last_rows", "last", {x}, Attributes{}.set("n", std::int64_t{1}));
+    g.mark_output(y);
+    g.finalize();
+    CHECK(g.value(y).shape == Shape({1, 3}));
+
+    const Tensor xin = wave({4, 3}, 0.0F);
+    const std::vector<Tensor> out = Executor(g).run({{"x", xin}});
+    CHECK(ops::max_abs_diff(out[0], xin.slice(0, 3, 4).contiguous()) == 0.0F);
+}
+
+TEST(graph_attention_qkv_matches_ops)
+{
+    constexpr int T = 5, C = 8, H = 2;
+    const Graph g = attention_graph(T, C, H);
+    const Tensor qkv = wave({T, 3 * C}, 1.0F);
+    const std::vector<Tensor> out =
+        Executor(g).run({{"qkv", qkv}, {"positions", positions(0, T)}});
+
+    const Tensor want = ops::attention(qkv.slice(1, 0, C), qkv.slice(1, C, 2 * C),
+                                       qkv.slice(1, 2 * C, 3 * C), H);
+    CHECK(ops::max_abs_diff(out[0], want) < 1e-5F);
+}
+
+// 先 prefill 前 3 个 token，再一个一个 decode，每步的输出都应等于一次性整段算出的对应行
+TEST(graph_attention_qkv_kv_cache_incremental)
+{
+    constexpr int T = 6, C = 8, H = 2, prefill = 3;
+    const Tensor qkv = wave({T, 3 * C}, 2.0F);
+    const Tensor full =
+        Executor(attention_graph(T, C, H)).run({{"qkv", qkv}, {"positions", positions(0, T)}})[0];
+
+    GPTConfig cfg;
+    cfg.n_layer = 1;
+    cfg.n_head = H;
+    cfg.n_embd = C;
+    cfg.n_ctx = 16;
+    KVCache cache(cfg, T);
+
+    const Graph g_prefill = attention_graph(prefill, C, H);
+    Executor e_prefill(g_prefill);
+    e_prefill.set_kv_cache(&cache);
+    const Tensor head = e_prefill.run({{"qkv", qkv.slice(0, 0, prefill).contiguous()},
+                                       {"positions", positions(0, prefill)}})[0];
+    CHECK(ops::max_abs_diff(head, full.slice(0, 0, prefill).contiguous()) < 1e-5F);
+    CHECK(cache.length() == prefill);
+
+    const Graph g_decode = attention_graph(1, C, H);
+    Executor e_decode(g_decode);
+    e_decode.set_kv_cache(&cache);
+    for (int p = prefill; p < T; ++p)
+    {
+        const Tensor row = e_decode.run({{"qkv", qkv.slice(0, p, p + 1).contiguous()},
+                                         {"positions", positions(p, 1)}})[0];
+        CHECK(ops::max_abs_diff(row, full.slice(0, p, p + 1).contiguous()) < 1e-5F);
+    }
+    CHECK(cache.length() == T);
 }

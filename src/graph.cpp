@@ -377,6 +377,7 @@ std::vector<Tensor> Executor::run(const std::unordered_map<std::string, Tensor> 
             }
         }
         context.attributes = &node.attributes;
+        context.kv_cache = kv_cache_;
         // 执行 Op 获得 output Tensor
         const Op &op = reg.get(node.type);
         Tensor output = op.compute(&context);

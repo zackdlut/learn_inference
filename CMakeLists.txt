@@ -38,6 +38,7 @@ add_library(inference SHARED
     src/ops.cpp
     src/op.cpp
     src/builtin_ops.cpp
+    src/transformer_ops.cpp
     src/graph.cpp
     src/kernel.cpp
     src/kernel_matmul.cpp
@@ -46,6 +47,7 @@ add_library(inference SHARED
     src/thread_pool.cpp
     src/tokenizer.cpp
     src/gpt.cpp
+    src/gpt_graph.cpp
     src/model_file.cpp
     src/mlp.cpp
 )

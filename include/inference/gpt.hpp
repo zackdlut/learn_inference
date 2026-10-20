@@ -1,8 +1,12 @@
 #pragma once
+#include "inference/graph.hpp"
 #include "inference/model_file.hpp"
 #include "inference/tensor.hpp"
 #include <cstdint>
 #include <functional>
+#include <map>
+#include <memory>
+#include <utility>
 #include <vector>
 
 namespace inference
@@ -269,6 +273,24 @@ class GPT
     };
     Trace forward_trace(std::span<const int> tokens);
 
+    // ---- 计算图版本 ----
+    // 和上面的手写版算的是同一个模型，但前向不再是一段写死的 C++，而是先建一张 Graph
+    // （embedding → 12 × [ln → c_attn → attention → proj → + → ln → fc → gelu → proj → +] → ln_f → lm_head），
+    // 再交给 Executor 按拓扑序执行。手写版保留下来做对拍和性能基线。
+    //
+    // Graph 的输入形状是建图时定死的，所以每种 (T, last_only) 各建一张并缓存起来：
+    // decode 恒为 T=1，只建一次；prefill 每种 prompt 长度建一次。
+    // 只支持 fp32 权重，量化之后调用会报错。
+
+    // tokens 和 positions 两个输入都是 [T]；last_only 时只输出最后一个位置的 logits [1, n_vocab]
+    Graph build_graph(int T, bool last_only) const;
+    Tensor forward_graph(std::span<const int> tokens);
+    Tensor forward_one_graph(int token, int pos, KVCache &cache);
+    // 按算子的耗时统计（GenStats::*_ops）只有手写版有；这里只填 prefill_ms / decode_ms 和采样耗时
+    std::vector<int> generate_graph(std::span<const int> prompt, int max_new_tokens,
+                                    Sampler &sampler, GenStats *stats = nullptr,
+                                    const std::function<void(int)> &on_token = {});
+
   private:
     GPTConfig cfg_;
 
@@ -308,6 +330,17 @@ class GPT
     //   cache != nullptr → 读写缓存，只算新来的这几个 token
     Tensor forward_impl(std::span<const int> tokens, int start_pos, KVCache *cache, Trace *trace,
                         bool last_only);
+
+    // 键是 (T, last_only)
+    std::map<std::pair<int, bool>, std::unique_ptr<Graph>> graphs_;
+    Tensor run_graph(std::span<const int> tokens, int start_pos, KVCache *cache, bool last_only);
+
+    // generate / generate_graph 共用的 prefill + decode 循环。
+    // step(tokens, start_pos, cache) 处理这批 token 并返回最后一个位置的 logits
+    using StepFn = std::function<Tensor(std::span<const int>, int, KVCache &)>;
+    std::vector<int> generate_with(const StepFn &step, std::span<const int> prompt,
+                                   int max_new_tokens, Sampler &sampler, GenStats *stats,
+                                   const std::function<void(int)> &on_token);
 };
 
 } // namespace inference
